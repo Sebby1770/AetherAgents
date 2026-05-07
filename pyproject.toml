@@ -1,0 +1,20 @@
+[project]
+name = "aetheragents"
+version = "0.1.0"
+description = "Robust multi-agent orchestration framework"
+requires-python = ">=3.10"
+dependencies = [
+    "litellm>=1.52",
+    "chromadb>=0.5",
+    "pydantic>=2.8",
+    "fastapi>=0.115",
+    "uvicorn[standard]",
+    "opentelemetry-api",
+    "opentelemetry-sdk",
+    "opentelemetry-instrumentation-fastapi",
+    "sqlalchemy",
+    "aiofiles",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
