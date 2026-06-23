@@ -1,20 +1,74 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "aetheragents"
-version = "0.1.0"
-description = "Robust multi-agent orchestration framework"
+version = "0.2.0"
+description = "A lightweight, provider-agnostic multi-agent orchestration framework"
+readme = "README.md"
 requires-python = ">=3.10"
-dependencies = [
+license = { text = "MIT" }
+authors = [{ name = "Sebby1770" }]
+keywords = ["agents", "llm", "orchestration", "ai", "multi-agent", "tools"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# The core is intentionally tiny: only pydantic. Backends are opt-in extras so
+# you can run agents (with MockProvider) and the in-memory store with zero heavy
+# dependencies.
+dependencies = ["pydantic>=2.7"]
+
+[project.optional-dependencies]
+litellm = ["litellm>=1.52"]
+chroma = ["chromadb>=0.5"]
+server = ["fastapi>=0.115", "uvicorn[standard]>=0.30"]
+telemetry = [
+    "opentelemetry-api>=1.25",
+    "opentelemetry-sdk>=1.25",
+    "opentelemetry-instrumentation-fastapi>=0.46b0",
+]
+all = [
     "litellm>=1.52",
     "chromadb>=0.5",
-    "pydantic>=2.8",
     "fastapi>=0.115",
-    "uvicorn[standard]",
-    "opentelemetry-api",
-    "opentelemetry-sdk",
-    "opentelemetry-instrumentation-fastapi",
-    "sqlalchemy",
-    "aiofiles",
+    "uvicorn[standard]>=0.30",
+    "opentelemetry-api>=1.25",
+    "opentelemetry-sdk>=1.25",
 ]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10"]
+
+[project.urls]
+Homepage = "https://github.com/Sebby1770/AetherAgents"
+Repository = "https://github.com/Sebby1770/AetherAgents"
+Changelog = "https://github.com/Sebby1770/AetherAgents/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["."]
+include = ["aetheragents*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
