@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aetheragents"
-version = "0.2.0"
+version = "0.3.0"
 description = "A lightweight, provider-agnostic multi-agent orchestration framework"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,6 +30,7 @@ dependencies = ["pydantic>=2.7"]
 
 [project.optional-dependencies]
 litellm = ["litellm>=1.52"]
+anthropic = ["anthropic>=0.40"]
 chroma = ["chromadb>=0.5"]
 server = ["fastapi>=0.115", "uvicorn[standard]>=0.30"]
 telemetry = [
@@ -39,6 +40,7 @@ telemetry = [
 ]
 all = [
     "litellm>=1.52",
+    "anthropic>=0.40",
     "chromadb>=0.5",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",

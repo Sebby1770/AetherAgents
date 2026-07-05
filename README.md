@@ -29,19 +29,22 @@ print(agent.run("What is 2 + 2?").output)   # -> It's 4.
 
 | | |
 |---|---|
-| 🪶 **Tiny core** | The base install depends only on `pydantic`. Backends (LiteLLM, ChromaDB, FastAPI, OpenTelemetry) are opt-in extras. |
-| 🔌 **Provider-agnostic** | One `LLMProvider` interface. `LiteLLMProvider` reaches 100+ models; `MockProvider` runs offline. |
-| 🛠️ **Real tool schemas** | The `@tool` decorator generates JSON-Schema from your function signature and type hints — no hand-written specs. |
+| 🪶 **Tiny core** | The base install depends only on `pydantic`. Backends (LiteLLM, Anthropic, ChromaDB, FastAPI, OpenTelemetry) are opt-in extras. |
+| 🔌 **Provider-agnostic** | One `LLMProvider` interface. `LiteLLMProvider` reaches 100+ models, `AnthropicProvider` talks to Claude natively, `MockProvider` runs offline. |
+| 🌊 **Streaming** | `agent.astream()` yields live text deltas and tool events; every provider streams (native or fallback). |
+| 📦 **Structured output** | `run(prompt, response_model=MyModel)` returns a validated Pydantic instance, with automatic schema-violation retries. |
+| 🛠️ **Real tool schemas** | The `@tool` decorator generates JSON-Schema from your function signature and type hints — no hand-written specs. Built-in calculator / clock / HTTP tools included. |
 | 🤝 **Multi-agent** | Sequential pipelines, parallel fan-out, routing, and agent-as-tool delegation. |
-| 🧠 **Pluggable memory** | Rolling short-term window + long-term vector recall. Embedding-free in-memory store by default; ChromaDB optional. |
-| ✅ **Testable** | Deterministic mock provider + 35 unit tests means agent logic is testable without API keys or flakiness. |
-| 🔭 **Observable** | Optional OpenTelemetry tracing; structured step traces and token accounting on every run. |
+| 🧠 **Memory & sessions** | Rolling window + long-term vector recall, plus JSON-persisted `Session`s that survive restarts. |
+| ✅ **Testable** | Deterministic mock provider + 75 unit tests means agent logic is testable without API keys or flakiness. |
+| 🔭 **Observable & resilient** | Optional OpenTelemetry tracing, per-run step traces and token accounting, `RetryingProvider` backoff. |
 
 ## Install
 
 ```bash
 pip install aetheragents                 # tiny core (pydantic only)
-pip install 'aetheragents[litellm]'      # real models via LiteLLM
+pip install 'aetheragents[litellm]'      # 100+ models via LiteLLM
+pip install 'aetheragents[anthropic]'    # Claude via the official Anthropic SDK
 pip install 'aetheragents[chroma]'       # ChromaDB-backed long-term memory
 pip install 'aetheragents[server]'       # FastAPI HTTP server
 pip install 'aetheragents[all,dev]'      # everything + test/lint tooling
@@ -80,6 +83,66 @@ for step in result.steps:
     print(step.type, step.name or "", step.content or step.arguments)
 ```
 
+Prefer Claude natively? Swap the provider:
+
+```python
+from aetheragents import AnthropicProvider     # needs: pip install 'aetheragents[anthropic]'
+agent = Agent("assistant", AnthropicProvider("claude-sonnet-5"), tools=[get_weather])
+```
+
+Wrap any provider for resilience:
+
+```python
+from aetheragents import RetryingProvider
+provider = RetryingProvider(AnthropicProvider(), max_retries=3)   # exponential backoff
+```
+
+### Streaming
+
+`astream()` exposes the whole run as live events — text deltas, tool calls,
+tool results, and a terminal result:
+
+```python
+async for event in agent.astream("What's the weather in Melbourne?"):
+    if event.type == "delta":
+        print(event.delta, end="", flush=True)      # tokens as they arrive
+    elif event.type == "step" and event.step.type == "tool_call":
+        print(f"\n[calling {event.step.name}...]")
+    elif event.type == "result":
+        final = event.result                        # full AgentResult
+```
+
+### Structured output
+
+Ask for a Pydantic model and get a validated instance back. Invalid answers are
+automatically fed back to the model for correction:
+
+```python
+from pydantic import BaseModel
+
+class CityFacts(BaseModel):
+    city: str
+    country: str
+    population_millions: float
+
+result = agent.run("Tell me about Melbourne", response_model=CityFacts)
+result.parsed.country        # -> "Australia", guaranteed schema-valid
+```
+
+### Sessions
+
+Persist a conversation across runs — and across process restarts:
+
+```python
+from aetheragents import Session
+
+session = Session("support-42", path="sessions/support-42.json")
+agent.run("My printer is on fire", session=session)
+agent.run("It's STILL on fire",   session=session)   # sees the first turn
+# restart the process...
+session = Session("support-42", path="sessions/support-42.json")  # history restored
+```
+
 ### Tools
 
 Decorate any function with `@tool()`. The argument schema is derived from the
@@ -90,6 +153,14 @@ signature — required vs optional, and JSON types from your annotations.
 def search(query: str, limit: int = 5) -> list[str]:
     ...
 # -> parameters: {query: string (required), limit: integer}
+```
+
+Or start from the built-ins — a safe AST-based calculator (no `eval`), a UTC
+clock, and a capped HTTP fetcher:
+
+```python
+from aetheragents import builtin_tools
+agent = Agent("helper", provider, tools=builtin_tools())
 ```
 
 ### Multi-agent orchestration
@@ -162,17 +233,18 @@ app = create_app({"echo": Agent("echo", MockProvider(default="hi"))})
                         │    Agent     │ │    Agent     │   reasoning loop
                         └───┬──────┬───┘ └──────────────┘
                             │      │
-              ┌─────────────▼─┐  ┌─▼──────────────┐  ┌──────────────────┐
-              │ ToolRegistry  │  │ MemoryManager  │  │   LLMProvider    │
-              │ (auto schema) │  │ short + vector │  │ Mock | LiteLLM   │
-              └───────────────┘  └────────────────┘  └──────────────────┘
+              ┌─────────────▼─┐  ┌─▼──────────────┐  ┌───────────────────────────┐
+              │ ToolRegistry  │  │ MemoryManager  │  │        LLMProvider        │
+              │ (auto schema) │  │ short + vector │  │ Mock | LiteLLM | Anthropic│
+              │ + built-ins   │  │ + Session      │  │ (+ RetryingProvider wrap) │
+              └───────────────┘  └────────────────┘  └───────────────────────────┘
 ```
 
 ## Development
 
 ```bash
 pip install -e '.[dev]'
-pytest          # 35 tests, fully offline
+pytest          # 75 tests, fully offline
 ruff check .    # lint
 ```
 
@@ -181,15 +253,15 @@ Run the examples:
 ```bash
 python examples/quickstart.py
 python examples/research_team.py
+python examples/streaming_and_structured.py
 ```
 
 ## Roadmap
 
-- Streaming responses (`provider.stream`)
-- Structured output / response models
-- Built-in tools (HTTP fetch, Python sandbox)
-- Persistent conversation sessions
-- Anthropic-native provider
+- SSE streaming endpoint in the FastAPI server
+- Per-model token cost estimation
+- Guardrail hooks (input/output validation middleware)
+- More built-in tools (web search, sandboxed file I/O)
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
 

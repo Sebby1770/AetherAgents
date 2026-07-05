@@ -28,10 +28,12 @@ def create_app(agents: dict[str, Agent]) -> Any:
             "FastAPI is not installed. Install it with: pip install 'aetheragents[server]'"
         ) from exc
 
+    from . import __version__
+
     class RunRequest(BaseModel):
         prompt: str
 
-    app = FastAPI(title="AetherAgents", version="0.2.0")
+    app = FastAPI(title="AetherAgents", version=__version__)
 
     @app.get("/agents")
     def list_agents() -> dict[str, list[str]]:

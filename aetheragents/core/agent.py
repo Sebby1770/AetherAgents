@@ -1,23 +1,28 @@
 """The :class:`Agent`: a reasoning loop over an LLM provider, tools and memory.
 
 An agent takes a prompt, lets the model think and call tools in a loop, and
-returns a structured :class:`AgentResult`. Agents can also be exposed *as tools*
-(:meth:`Agent.as_tool`) so one agent can delegate to another - the basis for the
-multi-agent orchestration in :mod:`aetheragents.core.orchestrator`.
+returns a structured :class:`AgentResult`. The loop itself is exposed as an
+async event stream (:meth:`Agent.astream`) so callers can render text deltas
+and tool activity live; :meth:`Agent.arun` is the buffered form built on top of
+it. Agents can also be exposed *as tools* (:meth:`Agent.as_tool`) so one agent
+can delegate to another - the basis for the multi-agent orchestration in
+:mod:`aetheragents.core.orchestrator`.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from pydantic import BaseModel, Field
 
-from ..llm.base import LLMProvider, Usage
+from ..llm.base import LLMProvider, LLMResponse, Usage
 from ..telemetry import span
-from .errors import MaxStepsExceeded
+from .errors import MaxStepsExceeded, ProviderError, StructuredOutputError
 from .messages import Message, Role
+from .session import Session
+from .structured import parse_structured, schema_instruction
 from .tools import Tool, ToolRegistry, make_tool
 
 StepCallback = Callable[["Step"], None]
@@ -41,6 +46,8 @@ class AgentResult(BaseModel):
     steps: list[Step] = Field(default_factory=list)
     messages: list[Message] = Field(default_factory=list)
     usage: Usage = Field(default_factory=Usage)
+    #: The validated ``response_model`` instance when structured output was requested.
+    parsed: Any = None
 
     @property
     def tool_calls(self) -> list[Step]:
@@ -48,6 +55,20 @@ class AgentResult(BaseModel):
 
     def __str__(self) -> str:  # pragma: no cover - convenience only
         return self.output or ""
+
+
+class AgentEvent(BaseModel):
+    """A live event yielded by :meth:`Agent.astream`.
+
+    * ``delta``  - a fragment of assistant text as it is generated
+    * ``step``   - a completed :class:`Step` (tool call / tool result / final)
+    * ``result`` - the terminal event, carrying the full :class:`AgentResult`
+    """
+
+    type: str  # "delta" | "step" | "result"
+    delta: str | None = None
+    step: Step | None = None
+    result: AgentResult | None = None
 
 
 def _as_registry(tools: Any) -> ToolRegistry:
@@ -89,11 +110,24 @@ class Agent:
         self.on_step = on_step
 
     # -- execution --------------------------------------------------------------
-    async def arun(
-        self, prompt: str, *, extra_messages: list[Message] | None = None
-    ) -> AgentResult:
-        """Run the agent to completion and return a structured result."""
-        messages = self._build_messages(prompt, extra_messages)
+    async def astream(
+        self,
+        prompt: str,
+        *,
+        extra_messages: list[Message] | None = None,
+        session: Session | None = None,
+        response_model: type[BaseModel] | None = None,
+        structured_retries: int = 2,
+    ) -> AsyncIterator[AgentEvent]:
+        """Run the agent, yielding :class:`AgentEvent`s as they happen.
+
+        The stream ends with exactly one ``result`` event. When
+        ``response_model`` is set, schema-violating answers are fed back to the
+        model up to ``structured_retries`` times; every model call (including
+        those retries) counts against ``max_steps``.
+        """
+        messages = self._build_messages(prompt, extra_messages, session, response_model)
+        session_start = len(messages) - 1  # the user prompt onwards is new history
         if self.memory is not None:
             self.memory.add_message("user", prompt)
 
@@ -101,15 +135,28 @@ class Agent:
         steps: list[Step] = []
         usage = Usage()
         output: str | None = None
+        parsed: BaseModel | None = None
+        parse_failures = 0
+        finished = False
 
         with span("agent.run", agent=self.name):
             for _ in range(self.max_steps):
-                resp = await self.provider.complete(
+                resp: LLMResponse | None = None
+                async for event in self.provider.stream(
                     messages,
                     tools=schemas,
                     model=self.model,
                     temperature=self.temperature,
-                )
+                ):
+                    if event.type == "delta" and event.delta:
+                        yield AgentEvent(type="delta", delta=event.delta)
+                    elif event.type == "done":
+                        resp = event.response
+                if resp is None:
+                    raise ProviderError(
+                        f"Provider '{self.provider.name}' stream ended without a 'done' event."
+                    )
+
                 usage = usage + resp.usage
                 messages.append(
                     Message.assistant(content=resp.content, tool_calls=resp.tool_calls)
@@ -117,31 +164,79 @@ class Agent:
 
                 if resp.has_tool_calls:
                     for call in resp.tool_calls:
-                        self._record(steps, Step(type="tool_call", name=call.name, arguments=call.arguments))
+                        step = Step(type="tool_call", name=call.name, arguments=call.arguments)
+                        self._record(steps, step)
+                        yield AgentEvent(type="step", step=step)
                         result = await self.tools.execute(call.name, call.arguments)
-                        self._record(
-                            steps,
-                            Step(type="tool_result", name=call.name, content=result.content, ok=result.ok),
+                        step = Step(
+                            type="tool_result", name=call.name, content=result.content, ok=result.ok
                         )
+                        self._record(steps, step)
+                        yield AgentEvent(type="step", step=step)
                         messages.append(
                             Message.tool(content=result.content, tool_call_id=call.id, name=call.name)
                         )
                     continue
 
+                if response_model is not None:
+                    try:
+                        parsed = parse_structured(resp.content, response_model)
+                    except StructuredOutputError as exc:
+                        parse_failures += 1
+                        if parse_failures > structured_retries:
+                            raise
+                        messages.append(
+                            Message.user(
+                                f"Your previous answer was rejected: {exc} "
+                                "Answer again with ONLY a valid JSON object matching the schema."
+                            )
+                        )
+                        continue
+
                 output = resp.content
-                self._record(steps, Step(type="final", content=output))
+                step = Step(type="final", content=output)
+                self._record(steps, step)
+                yield AgentEvent(type="step", step=step)
+                finished = True
                 break
-            else:
+
+            if not finished:
                 raise MaxStepsExceeded(
                     f"Agent '{self.name}' exceeded max_steps={self.max_steps}"
                 )
 
         if self.memory is not None and output is not None:
             self.memory.add_message("assistant", output)
+        if session is not None:
+            session.extend(messages[session_start:])
+            session.maybe_autosave()
 
-        return AgentResult(
-            agent=self.name, output=output, steps=steps, messages=messages, usage=usage
+        yield AgentEvent(
+            type="result",
+            result=AgentResult(
+                agent=self.name,
+                output=output,
+                steps=steps,
+                messages=messages,
+                usage=usage,
+                parsed=parsed,
+            ),
         )
+
+    async def arun(self, prompt: str, **kwargs: Any) -> AgentResult:
+        """Run the agent to completion and return a structured result.
+
+        Accepts the same keyword arguments as :meth:`astream`
+        (``extra_messages``, ``session``, ``response_model``,
+        ``structured_retries``).
+        """
+        result: AgentResult | None = None
+        async for event in self.astream(prompt, **kwargs):
+            if event.type == "result":
+                result = event.result
+        if result is None:  # pragma: no cover - astream always ends with result
+            raise ProviderError("Agent stream ended without a result event.")
+        return result
 
     def run(self, prompt: str, **kwargs: Any) -> AgentResult:
         """Synchronous wrapper around :meth:`arun`.
@@ -176,10 +271,16 @@ class Agent:
 
     # -- internals --------------------------------------------------------------
     def _build_messages(
-        self, prompt: str, extra_messages: list[Message] | None
+        self,
+        prompt: str,
+        extra_messages: list[Message] | None,
+        session: Session | None = None,
+        response_model: type[BaseModel] | None = None,
     ) -> list[Message]:
         messages: list[Message] = []
         system_text = self.instructions
+        if response_model is not None:
+            system_text = f"{system_text}\n\n{schema_instruction(response_model)}".strip()
         if self.memory is not None:
             hits = self.memory.recall(prompt, k=self.recall_k)
             if hits:
@@ -187,7 +288,11 @@ class Agent:
                 system_text = f"{system_text}\n\nRelevant memory:\n{recalled}".strip()
         if system_text:
             messages.append(Message.system(system_text))
-        if self.memory is not None:
+        if session is not None:
+            # The session owns the verbatim history; memory then only
+            # contributes semantic recall (above), never duplicate turns.
+            messages.extend(m for m in session.messages if m.role is not Role.SYSTEM)
+        elif self.memory is not None:
             for entry in self.memory.get_recent_context(self.history_k):
                 if entry.get("role") in ("user", "assistant") and entry.get("content"):
                     messages.append(Message(role=Role(entry["role"]), content=entry["content"]))

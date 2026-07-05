@@ -14,11 +14,11 @@ Each queued/handled item may be:
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from ..core.messages import Message, ToolCall
-from .base import LLMProvider, LLMResponse, Usage
+from .base import LLMProvider, LLMResponse, StreamEvent, Usage
 
 ScriptItem = Any
 Handler = Callable[[list[Message]], ScriptItem]
@@ -62,6 +62,29 @@ class MockProvider(LLMProvider):
             item = self._default or _echo_last_user(messages)
         self._call_count += 1
         return self._coerce(item, model or self._model)
+
+    async def stream(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        temperature: float | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[StreamEvent]:
+        """Native mock streaming: emit the response word by word.
+
+        Deterministic and offline, like :meth:`complete` - concatenating the
+        deltas always reconstructs ``response.content`` exactly.
+        """
+        resp = await self.complete(
+            messages, tools=tools, model=model, temperature=temperature, **kwargs
+        )
+        if resp.content:
+            words = resp.content.split(" ")
+            for i, word in enumerate(words):
+                yield StreamEvent(type="delta", delta=word if i == 0 else " " + word)
+        yield StreamEvent(type="done", response=resp)
 
     # -- normalisation ----------------------------------------------------------
     def _coerce(self, item: ScriptItem, model: str) -> LLMResponse:
