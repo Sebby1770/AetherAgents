@@ -36,7 +36,9 @@ print(agent.run("What is 2 + 2?").output)   # -> It's 4.
 | 🛠️ **Real tool schemas** | The `@tool` decorator generates JSON-Schema from your function signature and type hints — no hand-written specs. Built-in calculator / clock / HTTP tools included. |
 | 🤝 **Multi-agent** | Sequential pipelines, parallel fan-out, routing, and agent-as-tool delegation. |
 | 🧠 **Memory & sessions** | Rolling window + long-term vector recall, plus JSON-persisted `Session`s that survive restarts. |
-| ✅ **Testable** | Deterministic mock provider + 75 unit tests means agent logic is testable without API keys or flakiness. |
+| 🛡️ **Guardrails** | Input/output validation hooks (`max_length`, `blocklist`, `redact`, or any custom callable). |
+| 💰 **Cost tracking** | `result.cost_usd` estimates spend per run from a per-model price table you can extend. |
+| ✅ **Testable** | Deterministic mock provider + 105 unit tests means agent logic is testable without API keys or flakiness. |
 | 🔭 **Observable & resilient** | Optional OpenTelemetry tracing, per-run step traces and token accounting, `RetryingProvider` backoff. |
 
 ## Install
@@ -163,6 +165,44 @@ from aetheragents import builtin_tools
 agent = Agent("helper", provider, tools=builtin_tools())
 ```
 
+Need file access? `file_tools` confines reads/writes to a sandbox directory
+(traversal, absolute paths and symlink escapes are rejected):
+
+```python
+from aetheragents import file_tools
+agent = Agent("writer", provider, tools=file_tools("./workspace"))
+agent = Agent("reader", provider, tools=file_tools("./docs", readonly=True))
+```
+
+### Guardrails
+
+Validate or transform what goes into and comes out of an agent. A guardrail is
+any `(str) -> str` callable; raise `GuardrailError` to block the run:
+
+```python
+from aetheragents import Agent, blocklist, max_length, redact
+
+agent = Agent(
+    "support",
+    provider,
+    input_guardrails=[max_length(2000)],                  # reject huge prompts
+    output_guardrails=[redact(["hunter2"]), blocklist(["ssn"])],
+)
+```
+
+### Cost tracking
+
+Every result reports the model used and an estimated cost (or `None` for
+unknown models). Extend or override the price table at runtime:
+
+```python
+result = agent.run("summarise this")
+print(result.model, result.cost_usd)
+
+from aetheragents import register_model_cost
+register_model_cost("my-local-model", 0.0, 0.0)   # $/MTok input, output
+```
+
 ### Multi-agent orchestration
 
 ```python
@@ -218,7 +258,9 @@ from aetheragents import Agent, MockProvider
 from aetheragents.server import create_app     # needs [server]
 
 app = create_app({"echo": Agent("echo", MockProvider(default="hi"))})
-# uvicorn mymodule:app   ->  POST /agents/echo/run  {"prompt": "..."}
+# uvicorn mymodule:app
+#   POST /agents/echo/run     {"prompt": "..."}   -> JSON result (+ model, cost_usd)
+#   POST /agents/echo/stream  {"prompt": "..."}   -> Server-Sent Events (delta/step/result)
 ```
 
 ## Architecture
@@ -244,7 +286,7 @@ app = create_app({"echo": Agent("echo", MockProvider(default="hi"))})
 
 ```bash
 pip install -e '.[dev]'
-pytest          # 75 tests, fully offline
+pytest          # 105 tests, fully offline
 ruff check .    # lint
 ```
 
@@ -258,10 +300,10 @@ python examples/streaming_and_structured.py
 
 ## Roadmap
 
-- SSE streaming endpoint in the FastAPI server
-- Per-model token cost estimation
-- Guardrail hooks (input/output validation middleware)
-- More built-in tools (web search, sandboxed file I/O)
+- Parallel tool execution within a single agent step
+- Conversation branching / forking on `Session`
+- Pluggable embedding backends for `MemoryManager`
+- OpenTelemetry span coverage for tools and providers
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
 

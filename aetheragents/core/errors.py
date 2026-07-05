@@ -34,5 +34,9 @@ class StructuredOutputError(AetherError):
     """Raised when a model's output cannot be parsed into the requested model."""
 
 
+class GuardrailError(AetherError):
+    """Raised when a guardrail blocks an agent's input or output."""
+
+
 class OrchestrationError(AetherError):
     """Raised when multi-agent orchestration fails."""

@@ -6,6 +6,7 @@ from .agent import Agent, AgentEvent, AgentResult, Step
 from .errors import (
     AetherError,
     ConfigError,
+    GuardrailError,
     MaxStepsExceeded,
     OrchestrationError,
     ProviderError,
@@ -13,6 +14,7 @@ from .errors import (
     ToolError,
     ToolNotFoundError,
 )
+from .guardrails import Guardrail, apply_guardrails, blocklist, max_length, redact
 from .memory import ChromaVectorStore, InMemoryVectorStore, MemoryManager, VectorStore
 from .messages import Message, Role, ToolCall
 from .orchestrator import Orchestrator, keyword_router
@@ -43,6 +45,12 @@ __all__ = [
     "extract_json",
     "parse_structured",
     "schema_instruction",
+    "Guardrail",
+    "apply_guardrails",
+    "blocklist",
+    "max_length",
+    "redact",
+    "GuardrailError",
     "AetherError",
     "ConfigError",
     "ProviderError",

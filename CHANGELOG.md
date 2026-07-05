@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-05
+
+Ships the remaining v0.3 roadmap: SSE streaming over HTTP, per-model cost
+estimation, guardrails, and sandboxed file tools.
+
+### Added
+- **SSE streaming endpoint**: the FastAPI server now serves
+  `POST /agents/{name}/stream`, emitting the agent's live event stream as
+  Server-Sent Events (`delta`, `step`, `result`). The `run` endpoint response
+  now also includes `model` and `cost_usd`.
+- **Cost estimation** (`aetheragents.costs`): `estimate_cost(model, usage)`
+  with a longest-prefix price table (current Anthropic rates; other providers
+  approximate), `register_model_cost()` for overrides, and provider-prefix
+  normalisation (`anthropic.`, `litellm:`, ...). `AgentResult` gained `model`
+  and a `cost_usd` property; unknown models yield `None`, never zero.
+- **Guardrails** (`aetheragents.core.guardrails`): input/output hooks on
+  `Agent` (`input_guardrails=` / `output_guardrails=`). A guardrail is any
+  `(str) -> str` callable; raise `GuardrailError` to block. Built-ins:
+  `max_length`, `blocklist`, `redact`. Input guards run before the model is
+  called; output guards run on the final answer before structured parsing.
+- **Sandboxed file tools** (`aetheragents.tools.file_tools(root, readonly=)`):
+  `read_file` / `write_file` / `list_files` confined to a root directory with
+  canonical-path traversal protection (rejects `..`, absolute paths and
+  symlink escapes) and size caps.
+- 29 new offline tests (105 total), including real FastAPI TestClient coverage
+  of the run and SSE endpoints.
+
+### Changed
+- `AnthropicProvider` default model updated to `claude-opus-4-8` (current
+  Anthropic default recommendation).
+
+### Fixed
+- The FastAPI endpoints previously rejected request bodies with 422: the
+  request model was defined in a closure, unresolvable under postponed
+  annotation evaluation, so FastAPI treated the body as a query parameter.
+  `RunRequest` now lives at module level.
+
 ## [0.3.0] - 2026-07-04
 
 This release ships every item from the v0.2 roadmap: streaming, structured
@@ -116,6 +153,7 @@ testable multi-agent framework.
 - The package is now importable without `litellm`, `chromadb` or
   `pydantic-settings` installed (previously `import aetheragents` could fail).
 
-[Unreleased]: https://github.com/Sebby1770/AetherAgents/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Sebby1770/AetherAgents/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Sebby1770/AetherAgents/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Sebby1770/AetherAgents/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Sebby1770/AetherAgents/releases/tag/v0.2.0

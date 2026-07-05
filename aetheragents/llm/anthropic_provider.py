@@ -20,7 +20,7 @@ from ..core.errors import ProviderError
 from ..core.messages import Message, Role, ToolCall
 from .base import LLMProvider, LLMResponse, Usage
 
-DEFAULT_MODEL = "claude-sonnet-5"
+DEFAULT_MODEL = "claude-opus-4-8"
 
 
 def to_anthropic_messages(messages: list[Message]) -> tuple[str, list[dict[str, Any]]]:
