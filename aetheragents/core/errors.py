@@ -30,5 +30,9 @@ class MaxStepsExceeded(AetherError):
     """Raised when an agent loop exceeds ``max_steps`` without finishing."""
 
 
+class StructuredOutputError(AetherError):
+    """Raised when a model's output cannot be parsed into the requested model."""
+
+
 class OrchestrationError(AetherError):
     """Raised when multi-agent orchestration fails."""

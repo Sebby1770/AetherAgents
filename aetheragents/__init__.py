@@ -12,7 +12,8 @@ Quick start::
     agent = Agent("calc", MockProvider(["The answer is 4."]), tools=[add])
     print(agent.run("What is 2 + 2?").output)
 
-Swap :class:`MockProvider` for :class:`LiteLLMProvider` to talk to a real model.
+Swap :class:`MockProvider` for :class:`LiteLLMProvider` or
+:class:`AnthropicProvider` to talk to a real model.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from .config import Settings, get_settings
 from .core import (
     AetherError,
     Agent,
+    AgentEvent,
     AgentResult,
     ConfigError,
     InMemoryVectorStore,
@@ -31,21 +33,34 @@ from .core import (
     Orchestrator,
     ProviderError,
     Role,
+    Session,
     Step,
+    StructuredOutputError,
     Tool,
     ToolCall,
     ToolError,
     ToolNotFoundError,
     ToolRegistry,
     ToolResult,
+    extract_json,
     keyword_router,
     make_tool,
     tool,
 )
-from .llm import LiteLLMProvider, LLMProvider, LLMResponse, MockProvider, Usage
+from .llm import (
+    AnthropicProvider,
+    LiteLLMProvider,
+    LLMProvider,
+    LLMResponse,
+    MockProvider,
+    RetryingProvider,
+    StreamEvent,
+    Usage,
+)
 from .telemetry import configure_tracing, span
+from .tools import builtin_tools
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "__version__",
@@ -54,16 +69,19 @@ __all__ = [
     "get_settings",
     # agents & orchestration
     "Agent",
+    "AgentEvent",
     "AgentResult",
     "Step",
     "Orchestrator",
     "keyword_router",
+    "Session",
     # tools
     "ToolRegistry",
     "Tool",
     "ToolResult",
     "tool",
     "make_tool",
+    "builtin_tools",
     # memory
     "MemoryManager",
     "InMemoryVectorStore",
@@ -71,12 +89,17 @@ __all__ = [
     "Message",
     "Role",
     "ToolCall",
+    # structured output
+    "extract_json",
     # providers
     "LLMProvider",
     "LLMResponse",
+    "StreamEvent",
     "Usage",
     "MockProvider",
     "LiteLLMProvider",
+    "AnthropicProvider",
+    "RetryingProvider",
     # telemetry
     "configure_tracing",
     "span",
@@ -84,6 +107,7 @@ __all__ = [
     "AetherError",
     "ConfigError",
     "ProviderError",
+    "StructuredOutputError",
     "ToolError",
     "ToolNotFoundError",
     "MaxStepsExceeded",

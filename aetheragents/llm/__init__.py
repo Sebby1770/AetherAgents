@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
-from .base import LLMProvider, LLMResponse, Usage
+from .anthropic_provider import AnthropicProvider
+from .base import LLMProvider, LLMResponse, StreamEvent, Usage
 from .litellm_provider import LiteLLMProvider
 from .mock import MockProvider
+from .retry import RetryingProvider
 
 __all__ = [
     "LLMProvider",
     "LLMResponse",
+    "StreamEvent",
     "Usage",
     "MockProvider",
     "LiteLLMProvider",
+    "AnthropicProvider",
+    "RetryingProvider",
 ]

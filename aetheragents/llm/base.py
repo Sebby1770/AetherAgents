@@ -8,6 +8,7 @@ alongside this module (``mock``, ``litellm_provider``).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -45,6 +46,19 @@ class LLMResponse(BaseModel):
         return bool(self.tool_calls)
 
 
+class StreamEvent(BaseModel):
+    """An incremental event produced by :meth:`LLMProvider.stream`.
+
+    ``delta`` events carry a fragment of assistant text as it is generated; the
+    single terminal ``done`` event carries the complete :class:`LLMResponse`
+    (including any tool calls, finish reason and usage).
+    """
+
+    type: str  # "delta" | "done"
+    delta: str = ""
+    response: LLMResponse | None = None
+
+
 class LLMProvider(ABC):
     """Abstract base class for model providers."""
 
@@ -63,3 +77,27 @@ class LLMProvider(ABC):
     ) -> LLMResponse:
         """Produce a single completion for ``messages``."""
         raise NotImplementedError
+
+    async def stream(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        temperature: float | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[StreamEvent]:
+        """Stream a completion as :class:`StreamEvent`s.
+
+        The default implementation is a non-streaming fallback: it awaits
+        :meth:`complete`, emits the whole content as one ``delta``, then
+        ``done``. Providers with native streaming should override this; every
+        override must end with exactly one ``done`` event carrying the full
+        response.
+        """
+        resp = await self.complete(
+            messages, tools=tools, model=model, temperature=temperature, **kwargs
+        )
+        if resp.content:
+            yield StreamEvent(type="delta", delta=resp.content)
+        yield StreamEvent(type="done", response=resp)

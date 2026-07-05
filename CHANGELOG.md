@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-04
+
+This release ships every item from the v0.2 roadmap: streaming, structured
+output, built-in tools, persistent sessions and an Anthropic-native provider —
+plus automatic retries.
+
+### Added
+- **Streaming** end to end:
+  - `LLMProvider.stream()` yielding `StreamEvent`s (`delta` fragments followed
+    by a single `done` carrying the full `LLMResponse`), with a non-streaming
+    fallback in the base class so every provider supports it.
+  - Native streaming in `MockProvider` (deterministic word-by-word) and
+    `LiteLLMProvider` (true network streaming with chunked tool-call
+    aggregation).
+  - `Agent.astream()` — the agent loop as a live `AgentEvent` stream
+    (`delta` / `step` / `result`). `Agent.arun()` is now built on top of it, so
+    tool-calling, memory and sessions behave identically in both forms.
+- **Structured output**: `agent.run(prompt, response_model=MyModel)` parses the
+  final answer into a Pydantic model (available as `AgentResult.parsed`). The
+  JSON schema is injected into the system prompt; schema-violating answers are
+  fed back to the model up to `structured_retries` times before
+  `StructuredOutputError` is raised. Includes tolerant `extract_json()`
+  (code fences, JSON embedded in prose).
+- **Persistent sessions** (`aetheragents.core.session.Session`): conversation
+  history that spans multiple `run()` calls and, with a `path`, survives
+  process restarts via human-readable JSON. Autosaves after each run by
+  default; tool turns are recorded too.
+- **Anthropic-native provider** (`AnthropicProvider`): talks to Claude models
+  through the official SDK (optional `[anthropic]` extra) with full tool-use
+  support — system-prompt lifting, `tool_use`/`tool_result` block conversion
+  and usage mapping. Conversion helpers are pure functions with offline tests;
+  a `client` can be injected for testing or custom transports.
+- **Automatic retries** (`RetryingProvider`): wraps any provider with
+  exponential backoff on transient failures; configurable `max_retries`,
+  delays and retryable exception types.
+- **Built-in tools** (`aetheragents.tools`): `calculator` (whitelisted-AST
+  arithmetic — never `eval`), `utc_now`, and `http_get` (http/https only, size
+  and time capped). `builtin_tools()` returns them ready to register.
+- 40 new offline unit tests (75 total) covering streaming, structured output,
+  sessions, built-in tools, the Anthropic provider and retries.
+- New runnable example: `examples/streaming_and_structured.py`.
+
+### Changed
+- `AgentResult` gained a `parsed` field for structured output.
+- The FastAPI server now reports the real package version.
+- `Agent.run()`/`arun()` accept `session=`, `response_model=` and
+  `structured_retries=` keyword arguments.
+- When both a `Session` and a `MemoryManager` are configured, the session now
+  owns the verbatim conversation history and memory contributes only semantic
+  recall — previously the previous turns could be sent to the model twice.
+
 ## [0.2.0] - 2026-06-23
 
 The first functional release. The repository previously contained only a
@@ -65,5 +116,6 @@ testable multi-agent framework.
 - The package is now importable without `litellm`, `chromadb` or
   `pydantic-settings` installed (previously `import aetheragents` could fail).
 
-[Unreleased]: https://github.com/Sebby1770/AetherAgents/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Sebby1770/AetherAgents/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Sebby1770/AetherAgents/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Sebby1770/AetherAgents/releases/tag/v0.2.0
