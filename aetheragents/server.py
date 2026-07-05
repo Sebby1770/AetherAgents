@@ -15,23 +15,27 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import BaseModel
+
 from .core.agent import Agent
 
 
+class RunRequest(BaseModel):
+    """Request body for the run and stream endpoints."""
+
+    prompt: str
+
+
 def create_app(agents: dict[str, Agent]) -> Any:
-    """Build a FastAPI app that serves ``POST /agents/{name}/run``."""
+    """Build a FastAPI app serving ``POST /agents/{name}/run`` and ``.../stream``."""
     try:
         from fastapi import FastAPI, HTTPException
-        from pydantic import BaseModel
     except ImportError as exc:  # pragma: no cover - depends on env
         raise ImportError(
             "FastAPI is not installed. Install it with: pip install 'aetheragents[server]'"
         ) from exc
 
     from . import __version__
-
-    class RunRequest(BaseModel):
-        prompt: str
 
     app = FastAPI(title="AetherAgents", version=__version__)
 
@@ -53,6 +57,38 @@ def create_app(agents: dict[str, Agent]) -> Any:
             "output": result.output,
             "steps": [s.model_dump() for s in result.steps],
             "usage": result.usage.model_dump(),
+            "model": result.model,
+            "cost_usd": result.cost_usd,
         }
+
+    @app.post("/agents/{name}/stream")
+    async def stream_agent(name: str, body: RunRequest) -> Any:
+        """Stream the run as Server-Sent Events: `delta`, `step`, then `result`."""
+        from fastapi.responses import StreamingResponse
+
+        if name not in agents:
+            raise HTTPException(status_code=404, detail=f"Unknown agent: {name}")
+
+        async def gen() -> Any:
+            import json
+
+            async for event in agents[name].astream(body.prompt):
+                if event.type == "delta":
+                    payload = json.dumps({"text": event.delta})
+                elif event.type == "step":
+                    payload = json.dumps(event.step.model_dump())
+                else:  # result
+                    payload = json.dumps(
+                        {
+                            "agent": event.result.agent,
+                            "output": event.result.output,
+                            "usage": event.result.usage.model_dump(),
+                            "model": event.result.model,
+                            "cost_usd": event.result.cost_usd,
+                        }
+                    )
+                yield f"event: {event.type}\ndata: {payload}\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
 
     return app

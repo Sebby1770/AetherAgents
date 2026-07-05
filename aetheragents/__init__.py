@@ -25,6 +25,8 @@ from .core import (
     AgentEvent,
     AgentResult,
     ConfigError,
+    Guardrail,
+    GuardrailError,
     InMemoryVectorStore,
     MaxStepsExceeded,
     MemoryManager,
@@ -42,11 +44,15 @@ from .core import (
     ToolNotFoundError,
     ToolRegistry,
     ToolResult,
+    blocklist,
     extract_json,
     keyword_router,
     make_tool,
+    max_length,
+    redact,
     tool,
 )
+from .costs import estimate_cost, register_model_cost
 from .llm import (
     AnthropicProvider,
     LiteLLMProvider,
@@ -58,9 +64,9 @@ from .llm import (
     Usage,
 )
 from .telemetry import configure_tracing, span
-from .tools import builtin_tools
+from .tools import builtin_tools, file_tools
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "__version__",
@@ -82,6 +88,15 @@ __all__ = [
     "tool",
     "make_tool",
     "builtin_tools",
+    "file_tools",
+    # guardrails
+    "Guardrail",
+    "max_length",
+    "blocklist",
+    "redact",
+    # costs
+    "estimate_cost",
+    "register_model_cost",
     # memory
     "MemoryManager",
     "InMemoryVectorStore",
@@ -108,6 +123,7 @@ __all__ = [
     "ConfigError",
     "ProviderError",
     "StructuredOutputError",
+    "GuardrailError",
     "ToolError",
     "ToolNotFoundError",
     "MaxStepsExceeded",

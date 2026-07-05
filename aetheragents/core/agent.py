@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from ..llm.base import LLMProvider, LLMResponse, Usage
 from ..telemetry import span
 from .errors import MaxStepsExceeded, ProviderError, StructuredOutputError
+from .guardrails import Guardrail, apply_guardrails
 from .messages import Message, Role
 from .session import Session
 from .structured import parse_structured, schema_instruction
@@ -46,12 +47,21 @@ class AgentResult(BaseModel):
     steps: list[Step] = Field(default_factory=list)
     messages: list[Message] = Field(default_factory=list)
     usage: Usage = Field(default_factory=Usage)
+    #: The model that produced the final answer (as reported by the provider).
+    model: str | None = None
     #: The validated ``response_model`` instance when structured output was requested.
     parsed: Any = None
 
     @property
     def tool_calls(self) -> list[Step]:
         return [s for s in self.steps if s.type == "tool_call"]
+
+    @property
+    def cost_usd(self) -> float | None:
+        """Estimated USD cost of this run, or ``None`` for unknown models."""
+        from ..costs import estimate_cost
+
+        return estimate_cost(self.model, self.usage)
 
     def __str__(self) -> str:  # pragma: no cover - convenience only
         return self.output or ""
@@ -96,6 +106,8 @@ class Agent:
         recall_k: int = 4,
         history_k: int = 10,
         on_step: StepCallback | None = None,
+        input_guardrails: list[Guardrail] | None = None,
+        output_guardrails: list[Guardrail] | None = None,
     ) -> None:
         self.name = name
         self.provider = provider
@@ -108,6 +120,8 @@ class Agent:
         self.recall_k = recall_k
         self.history_k = history_k
         self.on_step = on_step
+        self.input_guardrails = input_guardrails or []
+        self.output_guardrails = output_guardrails or []
 
     # -- execution --------------------------------------------------------------
     async def astream(
@@ -126,6 +140,7 @@ class Agent:
         model up to ``structured_retries`` times; every model call (including
         those retries) counts against ``max_steps``.
         """
+        prompt = apply_guardrails(prompt, self.input_guardrails)
         messages = self._build_messages(prompt, extra_messages, session, response_model)
         session_start = len(messages) - 1  # the user prompt onwards is new history
         if self.memory is not None:
@@ -135,6 +150,7 @@ class Agent:
         steps: list[Step] = []
         usage = Usage()
         output: str | None = None
+        model_used: str | None = None
         parsed: BaseModel | None = None
         parse_failures = 0
         finished = False
@@ -158,6 +174,7 @@ class Agent:
                     )
 
                 usage = usage + resp.usage
+                model_used = resp.model or model_used
                 messages.append(
                     Message.assistant(content=resp.content, tool_calls=resp.tool_calls)
                 )
@@ -178,9 +195,13 @@ class Agent:
                         )
                     continue
 
+                final_text = resp.content
+                if final_text is not None and self.output_guardrails:
+                    final_text = apply_guardrails(final_text, self.output_guardrails)
+
                 if response_model is not None:
                     try:
-                        parsed = parse_structured(resp.content, response_model)
+                        parsed = parse_structured(final_text, response_model)
                     except StructuredOutputError as exc:
                         parse_failures += 1
                         if parse_failures > structured_retries:
@@ -193,7 +214,7 @@ class Agent:
                         )
                         continue
 
-                output = resp.content
+                output = final_text
                 step = Step(type="final", content=output)
                 self._record(steps, step)
                 yield AgentEvent(type="step", step=step)
@@ -219,6 +240,7 @@ class Agent:
                 steps=steps,
                 messages=messages,
                 usage=usage,
+                model=model_used,
                 parsed=parsed,
             ),
         )
