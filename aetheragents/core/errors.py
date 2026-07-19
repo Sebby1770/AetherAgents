@@ -40,3 +40,26 @@ class GuardrailError(AetherError):
 
 class OrchestrationError(AetherError):
     """Raised when multi-agent orchestration fails."""
+
+
+class BudgetExceeded(AetherError):
+    """Raised when an agent's estimated cost exceeds its ``max_cost_usd`` budget.
+
+    Attributes:
+        spent: Estimated USD spent so far (0.0 when cost is unknown).
+        budget: The configured budget cap in USD.
+        agent: Name of the agent that hit the cap, if known.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        spent: float = 0.0,
+        budget: float = 0.0,
+        agent: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.spent = spent
+        self.budget = budget
+        self.agent = agent

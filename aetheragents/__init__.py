@@ -24,6 +24,7 @@ from .core import (
     Agent,
     AgentEvent,
     AgentResult,
+    BudgetExceeded,
     ConfigError,
     Guardrail,
     GuardrailError,
@@ -53,6 +54,7 @@ from .core import (
     tool,
 )
 from .costs import estimate_cost, register_model_cost
+from .eval import CaseResult, EvalCase, EvalReport, run_cases
 from .llm import (
     AnthropicProvider,
     LiteLLMProvider,
@@ -66,7 +68,7 @@ from .llm import (
 from .telemetry import configure_tracing, span
 from .tools import builtin_tools, file_tools
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
     "__version__",
@@ -97,6 +99,11 @@ __all__ = [
     # costs
     "estimate_cost",
     "register_model_cost",
+    # eval
+    "run_cases",
+    "EvalCase",
+    "EvalReport",
+    "CaseResult",
     # memory
     "MemoryManager",
     "InMemoryVectorStore",
@@ -120,6 +127,7 @@ __all__ = [
     "span",
     # errors
     "AetherError",
+    "BudgetExceeded",
     "ConfigError",
     "ProviderError",
     "StructuredOutputError",

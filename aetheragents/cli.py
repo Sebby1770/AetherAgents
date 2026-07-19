@@ -1,0 +1,134 @@
+"""Console entry point for the ``aetheragents`` command.
+
+Commands::
+
+    aetheragents version
+    aetheragents run --agent demo "hello"
+    aetheragents doctor
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import sys
+from typing import Sequence
+
+
+def _cmd_version(_: argparse.Namespace) -> int:
+    from aetheragents import __version__
+
+    print(f"aetheragents {__version__}")
+    return 0
+
+
+def _cmd_run(args: argparse.Namespace) -> int:
+    """Run a named offline demo agent with :class:`MockProvider`."""
+    from aetheragents import Agent, MockProvider
+
+    prompt = args.prompt
+    if not prompt:
+        print("error: prompt is required", file=sys.stderr)
+        return 2
+
+    name = args.agent or "demo"
+    # Offline demo: deterministic mock that echoes a friendly reply.
+    provider = MockProvider(
+        [f"[{name}] You said: {prompt}"],
+        model="mock-1",
+    )
+    agent = Agent(
+        name,
+        provider,
+        instructions=f"You are the '{name}' demo agent (offline MockProvider).",
+    )
+    result = agent.run(prompt)
+    print(result.output or "")
+    if args.verbose:
+        print(f"\n# steps={len(result.steps)} model={result.model} "
+              f"tokens={result.usage.total_tokens}", file=sys.stderr)
+    return 0
+
+
+def _check_extra(package: str, extra: str) -> tuple[str, bool, str]:
+    """Return (label, installed, hint)."""
+    try:
+        found = importlib.util.find_spec(package) is not None
+    except ModuleNotFoundError:
+        # Namespace parents (e.g. opentelemetry.*) raise when absent.
+        found = False
+    hint = f"pip install 'aetheragents[{extra}]'" if not found else "ok"
+    return extra, found, hint
+
+
+def _cmd_doctor(_: argparse.Namespace) -> int:
+    """Report which optional extras are installed."""
+    from aetheragents import __version__
+
+    print(f"aetheragents {__version__}")
+    print(f"python {sys.version.split()[0]}")
+    print()
+    print("Optional extras:")
+
+    checks = [
+        _check_extra("litellm", "litellm"),
+        _check_extra("anthropic", "anthropic"),
+        _check_extra("chromadb", "chroma"),
+        _check_extra("fastapi", "server"),
+        _check_extra("opentelemetry.api", "telemetry"),
+    ]
+    # Core always present if we got here.
+    print("  core (pydantic) ......... ok")
+    all_ok = True
+    for extra, found, hint in checks:
+        status = "ok" if found else "MISSING"
+        if not found:
+            all_ok = False
+        pad = "." * max(1, 22 - len(extra))
+        print(f"  {extra} {pad} {status}" + ("" if found else f"  ({hint})"))
+
+    print()
+    if all_ok:
+        print("All optional extras are installed.")
+        return 0
+    print("Some extras are missing (core still works offline with MockProvider).")
+    return 0  # doctor is informational; never fail the shell hard
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="aetheragents",
+        description="AetherAgents — lightweight multi-agent framework CLI",
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    p_version = sub.add_parser("version", help="Print package version")
+    p_version.set_defaults(func=_cmd_version)
+
+    p_run = sub.add_parser("run", help="Run an offline demo agent (MockProvider)")
+    p_run.add_argument("prompt", nargs="?", default=None, help="Prompt text")
+    p_run.add_argument(
+        "--agent", "-a", default="demo", help="Agent name (default: demo)"
+    )
+    p_run.add_argument(
+        "--verbose", "-v", action="store_true", help="Print step/usage summary"
+    )
+    p_run.set_defaults(func=_cmd_run)
+
+    p_doctor = sub.add_parser("doctor", help="Check which optional extras are installed")
+    p_doctor.set_defaults(func=_cmd_doctor)
+
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    if not args.command:
+        parser.print_help()
+        return 0
+    return int(args.func(args))
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
