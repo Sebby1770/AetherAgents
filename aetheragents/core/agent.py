@@ -12,21 +12,24 @@ can delegate to another - the basis for the multi-agent orchestration in
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Callable
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 from ..llm.base import LLMProvider, LLMResponse, Usage
 from ..telemetry import span
-from .errors import MaxStepsExceeded, ProviderError, StructuredOutputError
+from .errors import BudgetExceeded, MaxStepsExceeded, ProviderError, StructuredOutputError
 from .guardrails import Guardrail, apply_guardrails
-from .messages import Message, Role
+from .messages import Message, Role, ToolCall
 from .session import Session
 from .structured import parse_structured, schema_instruction
-from .tools import Tool, ToolRegistry, make_tool
+from .tools import Tool, ToolRegistry, ToolResult, make_tool
 
 StepCallback = Callable[["Step"], None]
+ToolApproval = Callable[[str, dict[str, Any]], bool]
 
 
 class Step(BaseModel):
@@ -63,6 +66,37 @@ class AgentResult(BaseModel):
 
         return estimate_cost(self.model, self.usage)
 
+    def to_trace_dict(self) -> dict[str, Any]:
+        """Serialise this result as a plain dict suitable for JSON export.
+
+        Includes agent name, final output, step-by-step trace, token usage,
+        model, estimated cost and a simplified message log.
+        """
+        cost = self.cost_usd
+        return {
+            "agent": self.agent,
+            "output": self.output,
+            "model": self.model,
+            "cost_usd": cost,
+            "usage": self.usage.model_dump(),
+            "steps": [s.model_dump(mode="json") for s in self.steps],
+            "messages": [
+                m.model_dump(mode="json", exclude_none=True) for m in self.messages
+            ],
+            "parsed": (
+                self.parsed.model_dump(mode="json")
+                if isinstance(self.parsed, BaseModel)
+                else self.parsed
+            ),
+        }
+
+    def export_trace(self, path: str | Path) -> Path:
+        """Write :meth:`to_trace_dict` as pretty-printed JSON to ``path``."""
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(self.to_trace_dict(), indent=2), encoding="utf-8")
+        return target
+
     def __str__(self) -> str:  # pragma: no cover - convenience only
         return self.output or ""
 
@@ -89,6 +123,14 @@ def _as_registry(tools: Any) -> ToolRegistry:
     return ToolRegistry(list(tools))
 
 
+def _estimate_spent(model: str | None, usage: Usage) -> float:
+    """Return estimated spend, treating unknown/None cost as 0.0 for budgets."""
+    from ..costs import estimate_cost
+
+    cost = estimate_cost(model, usage)
+    return 0.0 if cost is None else cost
+
+
 class Agent:
     """A single autonomous agent."""
 
@@ -108,6 +150,9 @@ class Agent:
         on_step: StepCallback | None = None,
         input_guardrails: list[Guardrail] | None = None,
         output_guardrails: list[Guardrail] | None = None,
+        max_cost_usd: float | None = None,
+        tool_approval: ToolApproval | None = None,
+        parallel_tools: bool = False,
     ) -> None:
         self.name = name
         self.provider = provider
@@ -122,6 +167,9 @@ class Agent:
         self.on_step = on_step
         self.input_guardrails = input_guardrails or []
         self.output_guardrails = output_guardrails or []
+        self.max_cost_usd = max_cost_usd
+        self.tool_approval = tool_approval
+        self.parallel_tools = parallel_tools
 
     # -- execution --------------------------------------------------------------
     async def astream(
@@ -132,6 +180,7 @@ class Agent:
         session: Session | None = None,
         response_model: type[BaseModel] | None = None,
         structured_retries: int = 2,
+        max_cost_usd: float | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Run the agent, yielding :class:`AgentEvent`s as they happen.
 
@@ -139,7 +188,10 @@ class Agent:
         ``response_model`` is set, schema-violating answers are fed back to the
         model up to ``structured_retries`` times; every model call (including
         those retries) counts against ``max_steps``.
+
+        ``max_cost_usd`` overrides the agent-level budget for this run only.
         """
+        budget = max_cost_usd if max_cost_usd is not None else self.max_cost_usd
         prompt = apply_guardrails(prompt, self.input_guardrails)
         messages = self._build_messages(prompt, extra_messages, session, response_model)
         session_start = len(messages) - 1  # the user prompt onwards is new history
@@ -175,24 +227,14 @@ class Agent:
 
                 usage = usage + resp.usage
                 model_used = resp.model or model_used
+                self._check_budget(budget, model_used, usage)
                 messages.append(
                     Message.assistant(content=resp.content, tool_calls=resp.tool_calls)
                 )
 
                 if resp.has_tool_calls:
-                    for call in resp.tool_calls:
-                        step = Step(type="tool_call", name=call.name, arguments=call.arguments)
-                        self._record(steps, step)
-                        yield AgentEvent(type="step", step=step)
-                        result = await self.tools.execute(call.name, call.arguments)
-                        step = Step(
-                            type="tool_result", name=call.name, content=result.content, ok=result.ok
-                        )
-                        self._record(steps, step)
-                        yield AgentEvent(type="step", step=step)
-                        messages.append(
-                            Message.tool(content=result.content, tool_call_id=call.id, name=call.name)
-                        )
+                    async for event in self._handle_tool_calls(resp.tool_calls, steps, messages):
+                        yield event
                     continue
 
                 final_text = resp.content
@@ -250,7 +292,7 @@ class Agent:
 
         Accepts the same keyword arguments as :meth:`astream`
         (``extra_messages``, ``session``, ``response_model``,
-        ``structured_retries``).
+        ``structured_retries``, ``max_cost_usd``).
         """
         result: AgentResult | None = None
         async for event in self.astream(prompt, **kwargs):
@@ -273,6 +315,76 @@ class Agent:
         raise RuntimeError(
             "Agent.run() cannot be called from a running event loop; use 'await agent.arun(...)'."
         )
+
+    # -- tools ------------------------------------------------------------------
+    async def _handle_tool_calls(
+        self,
+        tool_calls: list[ToolCall],
+        steps: list[Step],
+        messages: list[Message],
+    ) -> AsyncIterator[AgentEvent]:
+        """Execute tool calls (serial or parallel) and yield step events."""
+        # Always emit tool_call steps first (in order) so the trace is stable.
+        for call in tool_calls:
+            step = Step(type="tool_call", name=call.name, arguments=call.arguments)
+            self._record(steps, step)
+            yield AgentEvent(type="step", step=step)
+
+        if self.parallel_tools and len(tool_calls) > 1:
+            results = await asyncio.gather(
+                *(self._execute_tool(call.name, call.arguments) for call in tool_calls)
+            )
+        else:
+            results = [
+                await self._execute_tool(call.name, call.arguments) for call in tool_calls
+            ]
+
+        for call, result in zip(tool_calls, results, strict=False):
+            step = Step(
+                type="tool_result", name=call.name, content=result.content, ok=result.ok
+            )
+            self._record(steps, step)
+            yield AgentEvent(type="step", step=step)
+            messages.append(
+                Message.tool(content=result.content, tool_call_id=call.id, name=call.name)
+            )
+
+    async def _execute_tool(self, name: str, args: dict[str, Any]) -> ToolResult:
+        """Run a tool, honouring the optional human-approval hook."""
+        if self.tool_approval is not None:
+            try:
+                approved = self.tool_approval(name, args or {})
+            except Exception as exc:  # approval hook must never crash the loop
+                return ToolResult(
+                    content=f"Error: tool approval failed: {exc}",
+                    summary="Approval error",
+                    ok=False,
+                    error=str(exc),
+                )
+            if not approved:
+                return ToolResult(
+                    content="User denied tool execution",
+                    summary="Denied",
+                    ok=False,
+                    error="denied",
+                )
+        return await self.tools.execute(name, args)
+
+    # -- budget -----------------------------------------------------------------
+    def _check_budget(
+        self, budget: float | None, model: str | None, usage: Usage
+    ) -> None:
+        if budget is None:
+            return
+        spent = _estimate_spent(model, usage)
+        if spent > budget:
+            raise BudgetExceeded(
+                f"Agent '{self.name}' exceeded budget "
+                f"${budget:.6f} (spent ${spent:.6f})",
+                spent=spent,
+                budget=budget,
+                agent=self.name,
+            )
 
     # -- delegation -------------------------------------------------------------
     def as_tool(self, name: str | None = None, description: str | None = None) -> Tool:

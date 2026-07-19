@@ -5,6 +5,7 @@ from __future__ import annotations
 from .agent import Agent, AgentEvent, AgentResult, Step
 from .errors import (
     AetherError,
+    BudgetExceeded,
     ConfigError,
     GuardrailError,
     MaxStepsExceeded,
@@ -52,6 +53,7 @@ __all__ = [
     "redact",
     "GuardrailError",
     "AetherError",
+    "BudgetExceeded",
     "ConfigError",
     "ProviderError",
     "StructuredOutputError",

@@ -34,12 +34,13 @@ print(agent.run("What is 2 + 2?").output)   # -> It's 4.
 | 🌊 **Streaming** | `agent.astream()` yields live text deltas and tool events; every provider streams (native or fallback). |
 | 📦 **Structured output** | `run(prompt, response_model=MyModel)` returns a validated Pydantic instance, with automatic schema-violation retries. |
 | 🛠️ **Real tool schemas** | The `@tool` decorator generates JSON-Schema from your function signature and type hints — no hand-written specs. Built-in calculator / clock / HTTP tools included. |
-| 🤝 **Multi-agent** | Sequential pipelines, parallel fan-out, routing, and agent-as-tool delegation. |
-| 🧠 **Memory & sessions** | Rolling window + long-term vector recall, plus JSON-persisted `Session`s that survive restarts. |
-| 🛡️ **Guardrails** | Input/output validation hooks (`max_length`, `blocklist`, `redact`, or any custom callable). |
-| 💰 **Cost tracking** | `result.cost_usd` estimates spend per run from a per-model price table you can extend. |
-| ✅ **Testable** | Deterministic mock provider + 105 unit tests means agent logic is testable without API keys or flakiness. |
-| 🔭 **Observable & resilient** | Optional OpenTelemetry tracing, per-run step traces and token accounting, `RetryingProvider` backoff. |
+| 🤝 **Multi-agent** | Sequential, parallel, route, **debate**, **map-reduce**, and agent-as-tool delegation. |
+| 🧠 **Memory & sessions** | Rolling window + long-term vector recall, JSON-persisted `Session`s, and **session forks** for branching. |
+| 🛡️ **Guardrails & budgets** | Input/output hooks plus hard **cost budgets** (`max_cost_usd`) and human **tool approval**. |
+| 💰 **Cost tracking** | `result.cost_usd` estimates spend per run; export full traces as JSON. |
+| ✅ **Testable** | Deterministic mock provider, offline **eval harness**, and a full unit suite — no API keys. |
+| 🔭 **Observable & resilient** | Optional OpenTelemetry, step traces, `RetryingProvider` backoff, Mermaid team diagrams. |
+| ⌨️ **CLI** | `aetheragents run`, `version`, and `doctor` for offline demos and install checks. |
 
 ## Install
 
@@ -131,20 +132,6 @@ result = agent.run("Tell me about Melbourne", response_model=CityFacts)
 result.parsed.country        # -> "Australia", guaranteed schema-valid
 ```
 
-### Sessions
-
-Persist a conversation across runs — and across process restarts:
-
-```python
-from aetheragents import Session
-
-session = Session("support-42", path="sessions/support-42.json")
-agent.run("My printer is on fire", session=session)
-agent.run("It's STILL on fire",   session=session)   # sees the first turn
-# restart the process...
-session = Session("support-42", path="sessions/support-42.json")  # history restored
-```
-
 ### Tools
 
 Decorate any function with `@tool()`. The argument schema is derived from the
@@ -190,17 +177,43 @@ agent = Agent(
 )
 ```
 
-### Cost tracking
+### Cost tracking & budgets
 
 Every result reports the model used and an estimated cost (or `None` for
-unknown models). Extend or override the price table at runtime:
+unknown models). Cap spend per agent or per run — exceeding the budget raises
+`BudgetExceeded` (unknown models count as `$0` so MockProvider stays offline-friendly):
 
 ```python
-result = agent.run("summarise this")
-print(result.model, result.cost_usd)
+from aetheragents import Agent, BudgetExceeded, register_model_cost
 
-from aetheragents import register_model_cost
+agent = Agent("assistant", provider, max_cost_usd=0.05)
+try:
+    result = agent.run("summarise this")
+    print(result.model, result.cost_usd)
+except BudgetExceeded as e:
+    print(f"stopped at ${e.spent:.4f} / ${e.budget}")
+
 register_model_cost("my-local-model", 0.0, 0.0)   # $/MTok input, output
+result.export_trace("traces/last-run.json")       # full step + message dump
+```
+
+### Tool approval & parallel tools
+
+Gate tool execution with a callable (CLI prompt, policy engine, …). Default
+`None` auto-approves everything. When the model returns multiple tool calls in
+one step, set `parallel_tools=True` to run them concurrently:
+
+```python
+def approve(name: str, args: dict) -> bool:
+    return name != "delete_everything"
+
+agent = Agent(
+    "safe",
+    provider,
+    tools=[...],
+    tool_approval=approve,     # False -> "User denied tool execution"
+    parallel_tools=True,       # asyncio.gather independent tool calls
+)
 ```
 
 ### Multi-agent orchestration
@@ -212,6 +225,8 @@ from aetheragents import Agent, MockProvider, Orchestrator, keyword_router
 team = Orchestrator([
     Agent("researcher", MockProvider(handler=lambda m: "facts...")),
     Agent("writer", MockProvider(handler=lambda m: "# Article")),
+    Agent("critic", MockProvider(handler=lambda m: "push back...")),
+    Agent("judge", MockProvider(handler=lambda m: "final synthesis")),
 ])
 
 # Pipeline: researcher's output feeds the writer
@@ -223,12 +238,67 @@ results = asyncio.run(team.parallel("Summarise X"))
 # Route: pick one agent by keyword
 router = keyword_router({"write": "writer"}, default="researcher")
 chosen = asyncio.run(team.route("please write a post", selector=router))
+
+# Debate: multi-round discussion + optional synthesizer
+debate = asyncio.run(team.debate(
+    "Should we ship Friday?",
+    agents=["writer", "critic"],
+    rounds=2,
+    synthesizer="judge",
+))
+print(debate["output"])
+
+# Map-reduce: parallel workers, then a reducer over their outputs
+mr = asyncio.run(team.map_reduce(
+    "Research topic X",
+    worker_names=["researcher", "critic"],
+    reducer_name="writer",
+))
+print(mr["output"])
+
+# Docs: Mermaid diagram of the team
+print(team.to_mermaid())
 ```
 
 **Delegation** — expose any agent as a tool so a "manager" agent can call it:
 
 ```python
 manager = Agent("manager", provider, tools=[team["researcher"].as_tool()])
+```
+
+### Sessions & forks
+
+```python
+from aetheragents import Session
+
+session = Session("support-42", path="sessions/support-42.json")
+agent.run("My printer is on fire", session=session)
+
+# Branch the conversation without mutating the parent history
+branch = session.fork(name="try-reset")
+agent.run("Have you tried turning it off and on?", session=branch)
+```
+
+### Offline eval
+
+```python
+from aetheragents import Agent, MockProvider
+from aetheragents.eval import run_cases
+
+agent = Agent("demo", MockProvider(["hello world", "42"]))
+report = run_cases(agent, [
+    {"prompt": "greet", "expect_contains": "hello"},
+    {"prompt": "answer", "expect_contains": "42"},
+])
+assert report.ok
+```
+
+### CLI
+
+```bash
+aetheragents version
+aetheragents doctor                          # which extras are installed?
+aetheragents run --agent demo "hello"        # offline MockProvider demo
 ```
 
 ### Memory
@@ -268,7 +338,7 @@ app = create_app({"echo": Agent("echo", MockProvider(default="hi"))})
 ```
                 ┌─────────────────────────────────────────────┐
                 │                Orchestrator                  │
-                │   sequential · parallel · route · delegate   │
+                │ sequential · parallel · route · debate · map-reduce │
                 └───────────────┬──────────────┬──────────────┘
                                 │              │
                         ┌───────▼──────┐ ┌─────▼────────┐
@@ -286,8 +356,9 @@ app = create_app({"echo": Agent("echo", MockProvider(default="hi"))})
 
 ```bash
 pip install -e '.[dev]'
-pytest          # 105 tests, fully offline
+pytest          # fully offline
 ruff check .    # lint
+aetheragents doctor
 ```
 
 Run the examples:
@@ -300,10 +371,9 @@ python examples/streaming_and_structured.py
 
 ## Roadmap
 
-- Parallel tool execution within a single agent step
-- Conversation branching / forking on `Session`
 - Pluggable embedding backends for `MemoryManager`
 - OpenTelemetry span coverage for tools and providers
+- Richer CLI (session resume, team run)
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
 

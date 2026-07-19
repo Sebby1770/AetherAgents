@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-19
+
+Orchestration power, safety rails, offline eval, and a first-class CLI.
+
+### Added
+- **Budget caps**: `Agent(..., max_cost_usd=0.05)` or per-run
+  `agent.run(prompt, max_cost_usd=...)`. Raises `BudgetExceeded` when the
+  estimated spend crosses the cap. Unknown models (e.g. default MockProvider)
+  treat cost as `0` so offline demos keep working.
+- **Debate orchestration**: `Orchestrator.debate(prompt, agents=..., rounds=2,
+  synthesizer=...)` — multi-round discussion with an optional final synthesizer.
+- **Map-reduce orchestration**: `Orchestrator.map_reduce(prompt, worker_names,
+  reducer_name)` — parallel workers, then a reducer over concatenated outputs.
+- **Human-in-the-loop tool approval**: `Agent(..., tool_approval=fn)` where
+  `fn(tool_name, args) -> bool`. Denied tools return
+  `"User denied tool execution"` without crashing the loop.
+- **Session fork**: `session.fork(name=...)` deep-copies history for branching
+  conversations without mutating the parent.
+- **Trace export**: `result.to_trace_dict()` / `result.export_trace(path)` for
+  JSON debugging of steps, messages, usage and cost.
+- **Mermaid team diagram**: `orchestrator.to_mermaid()` renders agents as a
+  flowchart for docs.
+- **Parallel tool execution**: `Agent(..., parallel_tools=True)` runs multiple
+  tool calls from one model step via `asyncio.gather`.
+- **Offline eval harness**: `aetheragents.eval.run_cases(agent, cases)` with
+  `expect_contains` assertions; returns an `EvalReport`.
+- **CLI** (`aetheragents` console script):
+  - `aetheragents version`
+  - `aetheragents run --agent demo "hello"` (MockProvider offline demo)
+  - `aetheragents doctor` (reports which optional extras are installed)
+- New offline tests: budget, debate/map-reduce, tool approval, session fork,
+  trace export, CLI, mermaid, parallel tools, eval.
+
+### Changed
+- Package version bumped to **0.5.0**.
+- Core dependency remains **pydantic only**.
+
 ## [0.4.0] - 2026-07-05
 
 Ships the remaining v0.3 roadmap: SSE streaming over HTTP, per-model cost

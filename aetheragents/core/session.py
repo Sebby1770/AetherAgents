@@ -7,7 +7,8 @@ agent can be resumed across runs - and, with a ``path``, across processes::
     agent.run("My printer is on fire", session=session)
     agent.run("It's still on fire",  session=session)   # sees the first turn
 
-Persistence is plain JSON, human-readable and diff-friendly.
+Branch with :meth:`Session.fork` to explore alternate paths without mutating
+the parent history. Persistence is plain JSON, human-readable and diff-friendly.
 """
 
 from __future__ import annotations
@@ -44,6 +45,33 @@ class Session:
 
     def clear(self) -> None:
         self.messages.clear()
+
+    def fork(
+        self,
+        name: str | None = None,
+        *,
+        path: str | Path | None = None,
+        autosave: bool | None = None,
+    ) -> Session:
+        """Deep-copy this session's history into a new branching session.
+
+        The forked session starts with an independent copy of every message so
+        further runs on either branch do not affect the other. ``name`` becomes
+        the new session id (defaults to ``"{id}-fork"``). Persistence settings
+        default to *no* autosave / path unless explicitly provided, so forks do
+        not overwrite the parent file by accident.
+        """
+        if autosave is None:
+            # Only autosave by default when a path was given for the fork.
+            autosave = path is not None
+        forked = Session(
+            id=name or f"{self.id}-fork",
+            path=path,
+            autosave=autosave,
+        )
+        # model_copy(deep=True) clones each pydantic Message independently.
+        forked.messages = [m.model_copy(deep=True) for m in self.messages]
+        return forked
 
     def __len__(self) -> int:
         return len(self.messages)
