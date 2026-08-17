@@ -133,6 +133,59 @@ def test_load_cases_jsonl(tmp_path):
     assert cases[1].expect_not_contains == "nope"
 
 
+def test_expect_json_object_and_keys():
+    agent = Agent("demo", MockProvider(['{"a": 1, "b": 2}']))
+    report = run_cases(
+        agent,
+        [{"prompt": "x", "expect_json": True, "expect_json_keys": ["a", "b"]}],
+    )
+    assert report.passed == 1
+    assert report.ok is True
+
+
+def test_expect_json_array():
+    agent = Agent("demo", MockProvider(["[1, 2, 3]"]))
+    report = run_cases(agent, [{"prompt": "x", "expect_json": True}])
+    assert report.passed == 1
+
+
+def test_expect_json_invalid():
+    agent = Agent("demo", MockProvider(["not json"]))
+    report = run_cases(agent, [{"prompt": "x", "expect_json": True}])
+    assert report.failed == 1
+    assert any("JSON" in r or "json" in r for r in report.cases[0].reasons)
+
+
+def test_expect_json_scalar_fails():
+    agent = Agent("demo", MockProvider(["42"]))
+    report = run_cases(agent, [{"prompt": "x", "expect_json": True}])
+    assert report.failed == 1
+
+
+def test_expect_json_missing_keys():
+    agent = Agent("demo", MockProvider(['{"a": 1}']))
+    report = run_cases(
+        agent,
+        [{"prompt": "x", "expect_json": True, "expect_json_keys": ["a", "b"]}],
+    )
+    assert report.failed == 1
+    assert any("b" in r for r in report.cases[0].reasons)
+
+
+def test_expect_json_keys_implies_json():
+    agent = Agent("demo", MockProvider(['{"name": "x"}']))
+    report = run_cases(agent, [{"prompt": "x", "expect_json_keys": ["name"]}])
+    assert report.passed == 1
+
+
+def test_expect_json_in_fence():
+    agent = Agent("demo", MockProvider(["```json\n{\"ok\": true}\n```"]))
+    report = run_cases(
+        agent, [{"prompt": "x", "expect_json": True, "expect_json_keys": ["ok"]}]
+    )
+    assert report.passed == 1
+
+
 def test_report_html_self_contained(tmp_path):
     agent = Agent("demo", MockProvider(["hello world", "oops"]))
     report = run_cases(

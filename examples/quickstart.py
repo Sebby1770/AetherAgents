@@ -22,7 +22,8 @@ def multiply(a: int, b: int) -> int:
     return a * b
 
 
-def main() -> None:
+def build_agent() -> Agent:
+    """Factory used by ``aetheragents run --agent-file examples/quickstart.py``."""
     # The mock is scripted: first it asks to call `multiply`, then it answers.
     provider = MockProvider(
         [
@@ -30,12 +31,16 @@ def main() -> None:
             "6 times 7 is 42.",
         ]
     )
-    agent = Agent(
+    return Agent(
         "calculator",
         provider,
         instructions="You are a precise calculator. Use tools for arithmetic.",
         tools=[multiply],
     )
+
+
+def main() -> None:
+    agent = build_agent()
 
     result = agent.run("What is 6 times 7?")
     print("Answer:", result.output)

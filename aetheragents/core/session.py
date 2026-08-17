@@ -8,7 +8,9 @@ agent can be resumed across runs - and, with a ``path``, across processes::
     agent.run("It's still on fire",  session=session)   # sees the first turn
 
 Branch with :meth:`Session.fork` to explore alternate paths without mutating
-the parent history. Persistence is plain JSON, human-readable and diff-friendly.
+the parent history. Call :meth:`Session.compact` to keep system messages and
+the last N user/assistant turns. Persistence is plain JSON, human-readable
+and diff-friendly.
 """
 
 from __future__ import annotations
@@ -82,6 +84,36 @@ class Session:
 
     def __len__(self) -> int:
         return len(self.messages)
+
+    def compact(self, keep_last: int = 4) -> Session:
+        """Drop older turns, keeping system messages and recent dialogue.
+
+        All ``system`` messages are retained. Of the remaining history, only
+        the last ``keep_last`` user/assistant turns are kept. A turn is a
+        user message plus the assistant/tool messages that follow it (or,
+        if there is no user, a trailing non-user group).
+
+        Returns ``self`` for chaining. Autosaves when a path is configured.
+        """
+        if keep_last < 0:
+            raise ValueError("keep_last must be >= 0")
+
+        systems = [m for m in self.messages if m.role is Role.SYSTEM]
+        rest = [m for m in self.messages if m.role is not Role.SYSTEM]
+        turns: list[list[Message]] = []
+        current: list[Message] = []
+        for msg in rest:
+            if msg.role is Role.USER and current:
+                turns.append(current)
+                current = [msg]
+            else:
+                current.append(msg)
+        if current:
+            turns.append(current)
+        kept = turns[-keep_last:] if keep_last else []
+        self.messages = systems + [m for turn in kept for m in turn]
+        self.maybe_autosave()
+        return self
 
     # -- persistence ----------------------------------------------------------
     def save(self, path: str | Path | None = None) -> Path:

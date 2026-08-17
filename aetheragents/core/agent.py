@@ -15,6 +15,7 @@ import asyncio
 import json
 import threading
 from collections.abc import AsyncIterator, Callable
+from html import escape
 from pathlib import Path
 from typing import Any
 
@@ -105,8 +106,121 @@ class AgentResult(BaseModel):
         target.write_text(json.dumps(self.to_trace_dict(), indent=2), encoding="utf-8")
         return target
 
+    def to_trace_html(self) -> str:
+        """Return a self-contained HTML rendering of this result's trace."""
+        return render_trace_html(self.to_trace_dict())
+
+    def write_trace_html(self, path: str | Path) -> Path:
+        """Write :meth:`to_trace_html` to ``path`` and return the path."""
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(self.to_trace_html(), encoding="utf-8")
+        return target
+
     def __str__(self) -> str:  # pragma: no cover - convenience only
         return self.output or ""
+
+
+def render_trace_html(data: dict[str, Any]) -> str:
+    """Render a :meth:`AgentResult.to_trace_dict` payload as self-contained HTML.
+
+    All dynamic text is HTML-escaped (including tool names, outputs and
+    ``<script>`` snippets). No external CSS/JS/CDN.
+    """
+    agent = escape(str(data.get("agent") or ""))
+    output = escape("" if data.get("output") is None else str(data.get("output")))
+    model = escape(str(data.get("model") or "—"))
+    cost = data.get("cost_usd")
+    cost_s = escape("—" if cost is None else f"{cost}")
+    usage = data.get("usage") or {}
+    if isinstance(usage, dict):
+        tokens = usage.get("total_tokens", 0)
+    else:
+        tokens = getattr(usage, "total_tokens", 0)
+    steps = data.get("steps") or []
+    messages = data.get("messages") or []
+
+    step_rows: list[str] = []
+    for i, raw in enumerate(steps, start=1):
+        step = raw if isinstance(raw, dict) else {}
+        stype = escape(str(step.get("type") or ""))
+        name = escape(str(step.get("name") or ""))
+        content = escape("" if step.get("content") is None else str(step.get("content")))
+        ok = step.get("ok", True)
+        args = step.get("arguments") or {}
+        args_html = ""
+        if args:
+            args_html = (
+                f"<div class='args'><code>{escape(json.dumps(args, default=str))}</code></div>"
+            )
+        status = "" if ok else " <span class='badge fail'>error</span>"
+        name_bit = f" · {name}" if name else ""
+        step_rows.append(
+            "<tr>"
+            f"<td>{i}</td>"
+            f"<td><span class='badge'>{stype}</span>{name_bit}{status}</td>"
+            f"<td><pre>{content}</pre>{args_html}</td>"
+            "</tr>"
+        )
+    if not step_rows:
+        step_rows.append("<tr><td colspan='3'>No steps.</td></tr>")
+
+    msg_rows: list[str] = []
+    for raw in messages:
+        msg = raw if isinstance(raw, dict) else {}
+        role = escape(str(msg.get("role") or ""))
+        content = escape("" if msg.get("content") is None else str(msg.get("content")))
+        tname = escape(str(msg.get("name") or ""))
+        extra = f" · {tname}" if tname else ""
+        msg_rows.append(
+            f"<tr><td>{role}{extra}</td><td><pre>{content}</pre></td></tr>"
+        )
+    if not msg_rows:
+        msg_rows.append("<tr><td colspan='2'>No messages.</td></tr>")
+
+    return (
+        "<!DOCTYPE html>\n"
+        "<html lang='en'>\n"
+        "<head>\n"
+        "<meta charset='utf-8'/>\n"
+        f"<title>AetherAgents trace — {agent}</title>\n"
+        "<style>\n"
+        "body{font-family:system-ui,sans-serif;margin:24px;color:#122;background:#f7f7f4;}\n"
+        "h1{font-size:1.4rem;margin:0 0 8px;}\n"
+        "h2{font-size:1.05rem;margin:20px 0 8px;}\n"
+        ".meta{color:#456;margin:0 0 16px;}\n"
+        "table{border-collapse:collapse;width:100%;background:#fff;margin:0 0 16px;}\n"
+        "th,td{border:1px solid #ddd;padding:8px 10px;vertical-align:top;text-align:left;}\n"
+        "th{background:#eef1ea;}\n"
+        "pre{white-space:pre-wrap;margin:0;font-family:ui-monospace,monospace;font-size:0.9em;}\n"
+        "code{font-family:ui-monospace,monospace;font-size:0.9em;}\n"
+        ".badge{display:inline-block;padding:2px 8px;border-radius:4px;"
+        "font-weight:600;background:#345;color:#fff;font-size:0.85em;}\n"
+        ".badge.fail{background:#c33;}\n"
+        ".args{margin-top:6px;color:#345;}\n"
+        ".final{background:#fff;border:1px solid #ddd;padding:12px;}\n"
+        "</style>\n"
+        "</head>\n"
+        "<body>\n"
+        f"<h1>Trace · {agent}</h1>\n"
+        f"<p class='meta'>model {model} · tokens {escape(str(tokens))} · cost {cost_s}</p>\n"
+        "<h2>Output</h2>\n"
+        f"<div class='final'><pre>{output}</pre></div>\n"
+        "<h2>Steps</h2>\n"
+        "<table>\n"
+        "<thead><tr><th>#</th><th>Step / tool</th><th>Content</th></tr></thead>\n"
+        "<tbody>\n"
+        + "\n".join(step_rows)
+        + "\n</tbody>\n</table>\n"
+        "<h2>Messages</h2>\n"
+        "<table>\n"
+        "<thead><tr><th>Role</th><th>Content</th></tr></thead>\n"
+        "<tbody>\n"
+        + "\n".join(msg_rows)
+        + "\n</tbody>\n</table>\n"
+        "</body>\n"
+        "</html>\n"
+    )
 
 
 class AgentEvent(BaseModel):

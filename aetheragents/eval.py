@@ -28,6 +28,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from .core.agent import Agent, AgentResult
+from .core.structured import extract_json
 
 
 class EvalCase(BaseModel):
@@ -38,6 +39,8 @@ class EvalCase(BaseModel):
     expect_not_contains: str | list[str] | None = None
     expect_tool: str | list[str] | None = None
     expect_regex: str | None = None
+    expect_json: bool = False
+    expect_json_keys: str | list[str] | None = None
     name: str | None = None
 
 
@@ -179,6 +182,23 @@ def _as_case(raw: EvalCase | dict[str, Any]) -> EvalCase:
     return EvalCase.model_validate(raw)
 
 
+def _check_json(output: str, required_keys: list[str]) -> tuple[bool, list[str]]:
+    """Return (ok, reasons) after asserting JSON object/array shape."""
+    try:
+        parsed = extract_json(output)
+    except ValueError:
+        return False, ["output is not valid JSON"]
+    if not isinstance(parsed, (dict, list)):
+        return False, ["JSON must be an object or array"]
+    if required_keys:
+        if not isinstance(parsed, dict):
+            return False, ["JSON must be an object to check keys"]
+        missing_keys = [k for k in required_keys if k not in parsed]
+        if missing_keys:
+            return False, ["missing JSON keys: " + ", ".join(missing_keys)]
+    return True, []
+
+
 def _expected_list(expect: str | list[str] | None) -> list[str]:
     if expect is None:
         return []
@@ -200,7 +220,8 @@ def load_cases(path: str | Path) -> list[EvalCase]:
 
     Each non-empty, non-comment line is a JSON object with at least
     ``prompt``, plus optional ``name``, ``expect_contains``,
-    ``expect_not_contains``, ``expect_tool`` and ``expect_regex``.
+    ``expect_not_contains``, ``expect_tool``, ``expect_regex``,
+    ``expect_json`` and ``expect_json_keys``.
     """
     cases: list[EvalCase] = []
     text = Path(path).read_text(encoding="utf-8")
@@ -235,6 +256,9 @@ def run_cases(
     * ``expect_not_contains`` - substring(s) that must *not* appear
     * ``expect_tool`` - tool name(s) that must appear in the result trace
     * ``expect_regex`` - optional regex that must match the output
+    * ``expect_json`` - if true, output must parse as a JSON object or array
+    * ``expect_json_keys`` - keys that must exist when the JSON is an object
+      (implies ``expect_json``)
     * ``name`` - optional label used in the report
 
     Fully offline when the agent uses :class:`~aetheragents.llm.MockProvider`.
@@ -246,6 +270,8 @@ def run_cases(
         expected = _expected_list(case.expect_contains)
         forbidden = _expected_list(case.expect_not_contains)
         tools_expected = _expected_list(case.expect_tool)
+        json_keys = _expected_list(case.expect_json_keys)
+        want_json = case.expect_json or bool(json_keys)
         try:
             result = agent.run(case.prompt)
             output = result.output or ""
@@ -264,13 +290,23 @@ def run_cases(
                 else:
                     if not regex_ok:
                         reasons.append(f"regex did not match: {case.expect_regex}")
+            json_ok = True
+            if want_json:
+                json_ok, json_reasons = _check_json(output, json_keys)
+                reasons.extend(json_reasons)
             if missing:
                 reasons.append("missing: " + ", ".join(missing))
             if unexpected:
                 reasons.append("unexpected: " + ", ".join(unexpected))
             if tools_missing:
                 reasons.append("missing tools: " + ", ".join(tools_missing))
-            passed = not missing and not unexpected and not tools_missing and regex_ok
+            passed = (
+                not missing
+                and not unexpected
+                and not tools_missing
+                and regex_ok
+                and json_ok
+            )
             case_result = CaseResult(
                 name=name,
                 prompt=case.prompt,

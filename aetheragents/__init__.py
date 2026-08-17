@@ -41,6 +41,7 @@ from .core import (
     Session,
     Step,
     StructuredOutputError,
+    SuperviseResult,
     Tool,
     ToolCall,
     ToolError,
@@ -64,6 +65,7 @@ from .llm import (
     LLMProvider,
     LLMResponse,
     MockProvider,
+    RateLimitedProvider,
     RetryingProvider,
     StreamEvent,
     Usage,
@@ -71,7 +73,7 @@ from .llm import (
 from .telemetry import configure_tracing, span
 from .tools import builtin_tools, file_tools
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 __all__ = [
     "__version__",
@@ -85,6 +87,7 @@ __all__ = [
     "Step",
     "Orchestrator",
     "HandoffResult",
+    "SuperviseResult",
     "keyword_router",
     "Session",
     # tools
@@ -128,6 +131,7 @@ __all__ = [
     "AnthropicProvider",
     "RetryingProvider",
     "CircuitBreakerProvider",
+    "RateLimitedProvider",
     # telemetry
     "configure_tracing",
     "span",

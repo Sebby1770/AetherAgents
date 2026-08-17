@@ -19,7 +19,7 @@ from .errors import (
 from .guardrails import Guardrail, apply_guardrails, blocklist, max_length, redact
 from .memory import ChromaVectorStore, InMemoryVectorStore, MemoryManager, VectorStore
 from .messages import Message, Role, ToolCall
-from .orchestrator import HandoffResult, Orchestrator, keyword_router
+from .orchestrator import HandoffResult, Orchestrator, SuperviseResult, keyword_router
 from .session import Session
 from .structured import extract_json, parse_structured, schema_instruction
 from .tools import Tool, ToolRegistry, ToolResult, make_tool, tool
@@ -31,6 +31,7 @@ __all__ = [
     "Step",
     "Orchestrator",
     "HandoffResult",
+    "SuperviseResult",
     "keyword_router",
     "Session",
     "ToolRegistry",

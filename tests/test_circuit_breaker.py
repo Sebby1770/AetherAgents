@@ -1,6 +1,7 @@
 """CircuitBreakerProvider trips after consecutive failures."""
 
 import asyncio
+import threading
 from typing import Any
 
 import pytest
@@ -100,6 +101,50 @@ def test_wraps_mock_provider():
     breaker = CircuitBreakerProvider(MockProvider(["fine"]))
     assert _complete(breaker).content == "fine"
     assert breaker.name == "breaker(mock)"
+
+
+def test_concurrent_failure_increments_are_not_lost():
+    """Lock around increment/open so two threads cannot drop failure counts."""
+    inner = FlakyProvider(failures=1000)
+    breaker = CircuitBreakerProvider(
+        inner, failure_threshold=1000, reset_after=60.0
+    )
+    per_thread = 10
+    n_threads = 4
+
+    def worker() -> None:
+        for _ in range(per_thread):
+            with pytest.raises(ProviderError):
+                _complete(breaker)
+
+    threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert breaker._consecutive_failures == n_threads * per_thread
+    assert breaker.is_open is False
+    assert isinstance(breaker._lock, threading.Lock)
+
+
+def test_record_failure_lock_serializes_open():
+    breaker = CircuitBreakerProvider(
+        MockProvider(["x"]), failure_threshold=8, reset_after=30.0
+    )
+
+    def worker() -> None:
+        for _ in range(10):
+            breaker._record_failure()
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert breaker._consecutive_failures == 40
+    assert breaker.is_open is True
 
 
 def test_stream_fallback_respects_open_breaker():

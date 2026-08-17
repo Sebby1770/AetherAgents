@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-18
+
+Supervisor loop, session compact, HTML traces, safer breaker, and JSON eval.
+
+### Added
+- **Supervisor loop**: `Orchestrator.supervise(prompt, worker, critic, max_rounds=2)`
+  runs a worker, then a critic that must reply with first line `ACCEPT` or
+  `REVISE: <notes>`. On revise, the worker is re-prompted with the notes.
+  Returns a `SuperviseResult` (`accepted`, `rounds`, `final` AgentResult).
+- **Session compact**: `Session.compact(keep_last=4)` keeps all system
+  messages plus the last N user/assistant turns (tool messages stay with
+  their turn).
+- **HTML traces**: `AgentResult.to_trace_html()` / `write_trace_html(path)`
+  emit a self-contained HTML dump of steps, tool names and outputs (HTML-
+  escaped). CLI: `aetheragents trace run.json` and
+  `aetheragents run ... --html-trace out.html`.
+- **Eval JSON shape**: `EvalCase.expect_json` requires the output to parse as
+  a JSON object or array; optional `expect_json_keys` must be present on
+  objects. `aetheragents eval cases.jsonl --html report.html` writes the
+  existing self-contained report.
+- **CLI agent file**: `aetheragents run --agent-file examples/quickstart.py
+  --factory build_agent "prompt"` imports a user module and calls a factory
+  that returns an `Agent` (default factory name: `build_agent`).
+- **Rate limiter**: `RateLimitedProvider(inner, min_interval_s=0.0)` sleeps
+  between calls. Inject `clock=` and `sleep=` for tests.
+
+### Changed
+- **Circuit breaker** state transitions (increment / open / reset) and the
+  open-check are guarded by a `threading.Lock` so concurrent `complete`
+  calls cannot lose failure counts.
+- Package version bumped to **0.7.0**.
+- Core dependency remains **pydantic only**.
+
 ## [0.6.0] - 2026-08-18
 
 Richer offline eval, agent handoff, circuit breakers, and tool timeouts.
@@ -219,7 +252,8 @@ testable multi-agent framework.
 - The package is now importable without `litellm`, `chromadb` or
   `pydantic-settings` installed (previously `import aetheragents` could fail).
 
-[Unreleased]: https://github.com/Sebby1770/AetherAgents/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/Sebby1770/AetherAgents/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/Sebby1770/AetherAgents/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/Sebby1770/AetherAgents/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Sebby1770/AetherAgents/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Sebby1770/AetherAgents/compare/v0.3.0...v0.4.0

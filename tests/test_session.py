@@ -84,6 +84,55 @@ def test_constructor_loads_existing_file(tmp_path):
     assert [m.content for m in resumed.messages] == ["remembered"]
 
 
+def test_session_compact_keeps_system_and_last_turns():
+    session = Session("compact")
+    session.append(Message.system("you are helpful"))
+    for i in range(6):
+        session.append(Message.user(f"q{i}"))
+        session.append(Message.assistant(f"a{i}"))
+    before = len(session)
+    session.compact(keep_last=4)
+    assert len(session) < before
+    assert session.replay_prompt() == "q5"
+    assert any(m.role is Role.SYSTEM and m.content == "you are helpful" for m in session.messages)
+    contents = [m.content for m in session.messages]
+    assert "q0" not in contents
+    assert "q2" in contents  # last 4 pairs: q2..q5
+    assert "q5" in contents
+    assert contents[-1] == "a5"
+
+
+def test_session_compact_after_agent_runs():
+    agent = Agent("a", MockProvider(["a1", "a2", "a3", "a4", "a5"]))
+    session = Session("s")
+    session.append(Message.system("sys"))
+    for i in range(5):
+        agent.run(f"q{i}", session=session)
+    before = len(session)
+    session.compact(keep_last=2)
+    assert len(session) < before
+    assert session.replay_prompt() == "q4"
+    assert any(m.content == "sys" and m.role is Role.SYSTEM for m in session.messages)
+
+
+def test_session_compact_keep_last_zero_leaves_system():
+    session = Session()
+    session.append(Message.system("stay"))
+    session.append(Message.user("gone"))
+    session.append(Message.assistant("gone too"))
+    session.compact(keep_last=0)
+    assert [m.content for m in session.messages] == ["stay"]
+
+
+def test_session_compact_rejects_negative():
+    session = Session()
+    try:
+        session.compact(keep_last=-1)
+        raise AssertionError("expected ValueError")
+    except ValueError:
+        pass
+
+
 def test_save_without_path_raises(tmp_path):
     session = Session()
     try:

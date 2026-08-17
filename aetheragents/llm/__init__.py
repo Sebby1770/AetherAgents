@@ -7,6 +7,7 @@ from .base import LLMProvider, LLMResponse, StreamEvent, Usage
 from .circuit import CircuitBreakerProvider
 from .litellm_provider import LiteLLMProvider
 from .mock import MockProvider
+from .rate_limit import RateLimitedProvider
 from .retry import RetryingProvider
 
 __all__ = [
@@ -19,4 +20,5 @@ __all__ = [
     "AnthropicProvider",
     "RetryingProvider",
     "CircuitBreakerProvider",
+    "RateLimitedProvider",
 ]
