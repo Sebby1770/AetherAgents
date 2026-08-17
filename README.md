@@ -34,13 +34,14 @@ print(agent.run("What is 2 + 2?").output)   # -> It's 4.
 | 🌊 **Streaming** | `agent.astream()` yields live text deltas and tool events; every provider streams (native or fallback). |
 | 📦 **Structured output** | `run(prompt, response_model=MyModel)` returns a validated Pydantic instance, with automatic schema-violation retries. |
 | 🛠️ **Real tool schemas** | The `@tool` decorator generates JSON-Schema from your function signature and type hints — no hand-written specs. Built-in calculator / clock / HTTP tools included. |
-| 🤝 **Multi-agent** | Sequential, parallel, route, **debate**, **map-reduce**, and agent-as-tool delegation. |
-| 🧠 **Memory & sessions** | Rolling window + long-term vector recall, JSON-persisted `Session`s, and **session forks** for branching. |
+| 🤝 **Multi-agent** | Sequential, parallel, route, **debate**, **map-reduce**, **handoff**, **supervise** (worker/critic), and agent-as-tool delegation. |
+| 🧠 **Memory & sessions** | Rolling window + long-term vector recall, JSON-persisted `Session`s, **session forks**, and **compact** to drop old turns. |
 | 🛡️ **Guardrails & budgets** | Input/output hooks plus hard **cost budgets** (`max_cost_usd`) and human **tool approval**. |
-| 💰 **Cost tracking** | `result.cost_usd` estimates spend per run; export full traces as JSON. |
+| 💰 **Cost tracking** | `result.cost_usd` estimates spend per run; export full traces as JSON or **self-contained HTML**. |
 | ✅ **Testable** | Deterministic mock provider, offline **eval harness**, and a full unit suite — no API keys. |
-| 🔭 **Observable & resilient** | Optional OpenTelemetry, step traces, `RetryingProvider` backoff, Mermaid team diagrams. |
-| ⌨️ **CLI** | `aetheragents run`, `version`, and `doctor` for offline demos and install checks. |
+| 🔭 **Observable & resilient** | Optional OpenTelemetry, step traces, `RetryingProvider` backoff, `CircuitBreakerProvider`, Mermaid team diagrams. |
+| ⌨️ **CLI** | `aetheragents run` (including `--agent-file`), `eval --html`, `trace`, `version`, and `doctor`. |
+| 🔁 **Eval, supervise, breaker** | JSON-shape eval (`expect_json` / `expect_json_keys`), `Orchestrator.supervise`, thread-safe `CircuitBreakerProvider`, `RateLimitedProvider`. |
 
 ## Install
 
@@ -96,8 +97,10 @@ agent = Agent("assistant", AnthropicProvider("claude-sonnet-5"), tools=[get_weat
 Wrap any provider for resilience:
 
 ```python
-from aetheragents import RetryingProvider
+from aetheragents import CircuitBreakerProvider, RateLimitedProvider, RetryingProvider
 provider = RetryingProvider(AnthropicProvider(), max_retries=3)   # exponential backoff
+provider = CircuitBreakerProvider(provider, failure_threshold=3, reset_after=30)
+provider = RateLimitedProvider(provider, min_interval_s=0.2)      # space out calls
 ```
 
 ### Streaming
@@ -195,6 +198,7 @@ except BudgetExceeded as e:
 
 register_model_cost("my-local-model", 0.0, 0.0)   # $/MTok input, output
 result.export_trace("traces/last-run.json")       # full step + message dump
+result.write_trace_html("traces/last-run.html")   # self-contained HTML (escaped)
 ```
 
 ### Tool approval & parallel tools
@@ -213,6 +217,7 @@ agent = Agent(
     tools=[...],
     tool_approval=approve,     # False -> "User denied tool execution"
     parallel_tools=True,       # asyncio.gather independent tool calls
+    tool_timeout_s=5.0,        # timed-out tools return an error ToolResult
 )
 ```
 
@@ -256,6 +261,19 @@ mr = asyncio.run(team.map_reduce(
 ))
 print(mr["output"])
 
+# Handoff: researcher output feeds the writer with a handoff prefix
+handed = asyncio.run(team.handoff("Write about X", from_name="researcher", to_name="writer"))
+print(handed.output)
+
+# Supervise: worker drafts, critic replies ACCEPT or REVISE: <notes>
+reviewed = asyncio.run(team.supervise(
+    "Write about X",
+    worker="writer",
+    critic="critic",
+    max_rounds=2,
+))
+print(reviewed.accepted, reviewed.rounds, reviewed.output)
+
 # Docs: Mermaid diagram of the team
 print(team.to_mermaid())
 ```
@@ -277,6 +295,12 @@ agent.run("My printer is on fire", session=session)
 # Branch the conversation without mutating the parent history
 branch = session.fork(name="try-reset")
 agent.run("Have you tried turning it off and on?", session=branch)
+
+# Re-run the last user turn against the current tools
+agent.replay(session)                 # or session.replay_prompt()
+
+# Drop older turns; keep system messages + the last 4 user/assistant pairs
+session.compact(keep_last=4)
 ```
 
 ### Offline eval
@@ -288,9 +312,19 @@ from aetheragents.eval import run_cases
 agent = Agent("demo", MockProvider(["hello world", "42"]))
 report = run_cases(agent, [
     {"prompt": "greet", "expect_contains": "hello"},
-    {"prompt": "answer", "expect_contains": "42"},
+    {"prompt": "answer", "expect_contains": "42", "expect_not_contains": "error"},
 ])
 assert report.ok
+report.write_html("eval-report.html")
+```
+
+JSONL cases (`expect_contains`, `expect_not_contains`, `expect_tool`, `expect_regex`,
+`expect_json`, `expect_json_keys`) load with `load_cases("examples/eval_cases.jsonl")`.
+
+```python
+report = run_cases(agent, [
+    {"prompt": "as json", "expect_json": True, "expect_json_keys": ["city", "temp"]},
+])
 ```
 
 ### CLI
@@ -299,6 +333,10 @@ assert report.ok
 aetheragents version
 aetheragents doctor                          # which extras are installed?
 aetheragents run --agent demo "hello"        # offline MockProvider demo
+aetheragents run --agent-file examples/quickstart.py --factory build_agent "What is 6 times 7?"
+aetheragents run "hello" --html-trace traces/run.html
+aetheragents eval examples/eval_cases.jsonl --html report.html
+aetheragents trace traces/last-run.json      # JSON -> self-contained HTML
 ```
 
 ### Memory
@@ -338,7 +376,7 @@ app = create_app({"echo": Agent("echo", MockProvider(default="hi"))})
 ```
                 ┌─────────────────────────────────────────────┐
                 │                Orchestrator                  │
-                │ sequential · parallel · route · debate · map-reduce │
+                │ sequential · parallel · route · debate · map-reduce · handoff · supervise │
                 └───────────────┬──────────────┬──────────────┘
                                 │              │
                         ┌───────▼──────┐ ┌─────▼────────┐
@@ -348,7 +386,7 @@ app = create_app({"echo": Agent("echo", MockProvider(default="hi"))})
               ┌─────────────▼─┐  ┌─▼──────────────┐  ┌───────────────────────────┐
               │ ToolRegistry  │  │ MemoryManager  │  │        LLMProvider        │
               │ (auto schema) │  │ short + vector │  │ Mock | LiteLLM | Anthropic│
-              │ + built-ins   │  │ + Session      │  │ (+ RetryingProvider wrap) │
+              │ + built-ins   │  │ + Session      │  │ (+ Retrying/breaker/rate) │
               └───────────────┘  └────────────────┘  └───────────────────────────┘
 ```
 

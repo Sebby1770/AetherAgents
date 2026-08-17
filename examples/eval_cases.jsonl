@@ -1,0 +1,3 @@
+{"name": "echo-hello", "prompt": "hello world", "expect_contains": ["hello"]}
+{"name": "no-traceback", "prompt": "hello world", "expect_not_contains": ["Traceback", "Error"]}
+{"name": "regex-said", "prompt": "hello world", "expect_regex": "You said:"}

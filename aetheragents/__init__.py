@@ -25,9 +25,11 @@ from .core import (
     AgentEvent,
     AgentResult,
     BudgetExceeded,
+    CircuitOpenError,
     ConfigError,
     Guardrail,
     GuardrailError,
+    HandoffResult,
     InMemoryVectorStore,
     MaxStepsExceeded,
     MemoryManager,
@@ -39,6 +41,7 @@ from .core import (
     Session,
     Step,
     StructuredOutputError,
+    SuperviseResult,
     Tool,
     ToolCall,
     ToolError,
@@ -54,13 +57,15 @@ from .core import (
     tool,
 )
 from .costs import estimate_cost, register_model_cost
-from .eval import CaseResult, EvalCase, EvalReport, run_cases
+from .eval import CaseResult, EvalCase, EvalReport, load_cases, run_cases
 from .llm import (
     AnthropicProvider,
+    CircuitBreakerProvider,
     LiteLLMProvider,
     LLMProvider,
     LLMResponse,
     MockProvider,
+    RateLimitedProvider,
     RetryingProvider,
     StreamEvent,
     Usage,
@@ -68,7 +73,7 @@ from .llm import (
 from .telemetry import configure_tracing, span
 from .tools import builtin_tools, file_tools
 
-__version__ = "0.5.0"
+__version__ = "0.7.0"
 
 __all__ = [
     "__version__",
@@ -81,6 +86,8 @@ __all__ = [
     "AgentResult",
     "Step",
     "Orchestrator",
+    "HandoffResult",
+    "SuperviseResult",
     "keyword_router",
     "Session",
     # tools
@@ -101,6 +108,7 @@ __all__ = [
     "register_model_cost",
     # eval
     "run_cases",
+    "load_cases",
     "EvalCase",
     "EvalReport",
     "CaseResult",
@@ -122,6 +130,8 @@ __all__ = [
     "LiteLLMProvider",
     "AnthropicProvider",
     "RetryingProvider",
+    "CircuitBreakerProvider",
+    "RateLimitedProvider",
     # telemetry
     "configure_tracing",
     "span",
@@ -130,6 +140,7 @@ __all__ = [
     "BudgetExceeded",
     "ConfigError",
     "ProviderError",
+    "CircuitOpenError",
     "StructuredOutputError",
     "GuardrailError",
     "ToolError",

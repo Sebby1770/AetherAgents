@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections.abc import AsyncIterator, Callable
+from html import escape
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +23,14 @@ from pydantic import BaseModel, Field
 
 from ..llm.base import LLMProvider, LLMResponse, Usage
 from ..telemetry import span
-from .errors import BudgetExceeded, MaxStepsExceeded, ProviderError, StructuredOutputError
+from .errors import (
+    BudgetExceeded,
+    MaxStepsExceeded,
+    ProviderError,
+    StructuredOutputError,
+    ToolError,
+    ToolNotFoundError,
+)
 from .guardrails import Guardrail, apply_guardrails
 from .messages import Message, Role, ToolCall
 from .session import Session
@@ -97,8 +106,121 @@ class AgentResult(BaseModel):
         target.write_text(json.dumps(self.to_trace_dict(), indent=2), encoding="utf-8")
         return target
 
+    def to_trace_html(self) -> str:
+        """Return a self-contained HTML rendering of this result's trace."""
+        return render_trace_html(self.to_trace_dict())
+
+    def write_trace_html(self, path: str | Path) -> Path:
+        """Write :meth:`to_trace_html` to ``path`` and return the path."""
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(self.to_trace_html(), encoding="utf-8")
+        return target
+
     def __str__(self) -> str:  # pragma: no cover - convenience only
         return self.output or ""
+
+
+def render_trace_html(data: dict[str, Any]) -> str:
+    """Render a :meth:`AgentResult.to_trace_dict` payload as self-contained HTML.
+
+    All dynamic text is HTML-escaped (including tool names, outputs and
+    ``<script>`` snippets). No external CSS/JS/CDN.
+    """
+    agent = escape(str(data.get("agent") or ""))
+    output = escape("" if data.get("output") is None else str(data.get("output")))
+    model = escape(str(data.get("model") or "—"))
+    cost = data.get("cost_usd")
+    cost_s = escape("—" if cost is None else f"{cost}")
+    usage = data.get("usage") or {}
+    if isinstance(usage, dict):
+        tokens = usage.get("total_tokens", 0)
+    else:
+        tokens = getattr(usage, "total_tokens", 0)
+    steps = data.get("steps") or []
+    messages = data.get("messages") or []
+
+    step_rows: list[str] = []
+    for i, raw in enumerate(steps, start=1):
+        step = raw if isinstance(raw, dict) else {}
+        stype = escape(str(step.get("type") or ""))
+        name = escape(str(step.get("name") or ""))
+        content = escape("" if step.get("content") is None else str(step.get("content")))
+        ok = step.get("ok", True)
+        args = step.get("arguments") or {}
+        args_html = ""
+        if args:
+            args_html = (
+                f"<div class='args'><code>{escape(json.dumps(args, default=str))}</code></div>"
+            )
+        status = "" if ok else " <span class='badge fail'>error</span>"
+        name_bit = f" · {name}" if name else ""
+        step_rows.append(
+            "<tr>"
+            f"<td>{i}</td>"
+            f"<td><span class='badge'>{stype}</span>{name_bit}{status}</td>"
+            f"<td><pre>{content}</pre>{args_html}</td>"
+            "</tr>"
+        )
+    if not step_rows:
+        step_rows.append("<tr><td colspan='3'>No steps.</td></tr>")
+
+    msg_rows: list[str] = []
+    for raw in messages:
+        msg = raw if isinstance(raw, dict) else {}
+        role = escape(str(msg.get("role") or ""))
+        content = escape("" if msg.get("content") is None else str(msg.get("content")))
+        tname = escape(str(msg.get("name") or ""))
+        extra = f" · {tname}" if tname else ""
+        msg_rows.append(
+            f"<tr><td>{role}{extra}</td><td><pre>{content}</pre></td></tr>"
+        )
+    if not msg_rows:
+        msg_rows.append("<tr><td colspan='2'>No messages.</td></tr>")
+
+    return (
+        "<!DOCTYPE html>\n"
+        "<html lang='en'>\n"
+        "<head>\n"
+        "<meta charset='utf-8'/>\n"
+        f"<title>AetherAgents trace — {agent}</title>\n"
+        "<style>\n"
+        "body{font-family:system-ui,sans-serif;margin:24px;color:#122;background:#f7f7f4;}\n"
+        "h1{font-size:1.4rem;margin:0 0 8px;}\n"
+        "h2{font-size:1.05rem;margin:20px 0 8px;}\n"
+        ".meta{color:#456;margin:0 0 16px;}\n"
+        "table{border-collapse:collapse;width:100%;background:#fff;margin:0 0 16px;}\n"
+        "th,td{border:1px solid #ddd;padding:8px 10px;vertical-align:top;text-align:left;}\n"
+        "th{background:#eef1ea;}\n"
+        "pre{white-space:pre-wrap;margin:0;font-family:ui-monospace,monospace;font-size:0.9em;}\n"
+        "code{font-family:ui-monospace,monospace;font-size:0.9em;}\n"
+        ".badge{display:inline-block;padding:2px 8px;border-radius:4px;"
+        "font-weight:600;background:#345;color:#fff;font-size:0.85em;}\n"
+        ".badge.fail{background:#c33;}\n"
+        ".args{margin-top:6px;color:#345;}\n"
+        ".final{background:#fff;border:1px solid #ddd;padding:12px;}\n"
+        "</style>\n"
+        "</head>\n"
+        "<body>\n"
+        f"<h1>Trace · {agent}</h1>\n"
+        f"<p class='meta'>model {model} · tokens {escape(str(tokens))} · cost {cost_s}</p>\n"
+        "<h2>Output</h2>\n"
+        f"<div class='final'><pre>{output}</pre></div>\n"
+        "<h2>Steps</h2>\n"
+        "<table>\n"
+        "<thead><tr><th>#</th><th>Step / tool</th><th>Content</th></tr></thead>\n"
+        "<tbody>\n"
+        + "\n".join(step_rows)
+        + "\n</tbody>\n</table>\n"
+        "<h2>Messages</h2>\n"
+        "<table>\n"
+        "<thead><tr><th>Role</th><th>Content</th></tr></thead>\n"
+        "<tbody>\n"
+        + "\n".join(msg_rows)
+        + "\n</tbody>\n</table>\n"
+        "</body>\n"
+        "</html>\n"
+    )
 
 
 class AgentEvent(BaseModel):
@@ -121,6 +243,15 @@ def _as_registry(tools: Any) -> ToolRegistry:
     if isinstance(tools, ToolRegistry):
         return tools
     return ToolRegistry(list(tools))
+
+
+def _timeout_tool_result(name: str, timeout: float) -> ToolResult:
+    return ToolResult(
+        content=f"Error: tool '{name}' timed out after {timeout}s",
+        summary="Timeout",
+        ok=False,
+        error="timeout",
+    )
 
 
 def _estimate_spent(model: str | None, usage: Usage) -> float:
@@ -153,6 +284,7 @@ class Agent:
         max_cost_usd: float | None = None,
         tool_approval: ToolApproval | None = None,
         parallel_tools: bool = False,
+        tool_timeout_s: float | None = None,
     ) -> None:
         self.name = name
         self.provider = provider
@@ -170,6 +302,7 @@ class Agent:
         self.max_cost_usd = max_cost_usd
         self.tool_approval = tool_approval
         self.parallel_tools = parallel_tools
+        self.tool_timeout_s = tool_timeout_s
 
     # -- execution --------------------------------------------------------------
     async def astream(
@@ -316,6 +449,28 @@ class Agent:
             "Agent.run() cannot be called from a running event loop; use 'await agent.arun(...)'."
         )
 
+    async def areplay(
+        self,
+        session: Session,
+        prompt: str | None = None,
+        **kwargs: Any,
+    ) -> AgentResult:
+        """Re-run the last user turn (or ``prompt``) against current tools."""
+        text = prompt if prompt is not None else session.replay_prompt()
+        kwargs.setdefault("session", session)
+        return await self.arun(text, **kwargs)
+
+    def replay(
+        self,
+        session: Session,
+        prompt: str | None = None,
+        **kwargs: Any,
+    ) -> AgentResult:
+        """Synchronous wrapper around :meth:`areplay`."""
+        text = prompt if prompt is not None else session.replay_prompt()
+        kwargs.setdefault("session", session)
+        return self.run(text, **kwargs)
+
     # -- tools ------------------------------------------------------------------
     async def _handle_tool_calls(
         self,
@@ -368,7 +523,71 @@ class Agent:
                     ok=False,
                     error="denied",
                 )
-        return await self.tools.execute(name, args)
+        timeout = self.tool_timeout_s
+        if timeout is None:
+            return await self.tools.execute(name, args)
+        return await self._execute_tool_timed(name, args, timeout)
+
+    async def _execute_tool_timed(
+        self, name: str, args: dict[str, Any], timeout: float
+    ) -> ToolResult:
+        """Run a tool with a timeout. Timed-out calls return an error result."""
+        timed_out = _timeout_tool_result(name, timeout)
+        try:
+            tool = self.tools.get(name)
+        except Exception:
+            return await self.tools.execute(name, args)
+
+        if tool.is_async:
+            try:
+                return await asyncio.wait_for(
+                    self.tools.execute(name, args), timeout=timeout
+                )
+            except TimeoutError:
+                return timed_out
+
+        # Sync tools can block the loop; run them off-thread and time the wait.
+        # The worker is not killed on timeout — we just return an error result.
+        return await asyncio.to_thread(
+            self._invoke_sync_tool_timed, name, args, timeout
+        )
+
+    def _invoke_sync_tool_timed(
+        self, name: str, args: dict[str, Any], timeout: float
+    ) -> ToolResult:
+        box: list[ToolResult] = []
+
+        def target() -> None:
+            box.append(self._invoke_sync_tool(name, args))
+
+        worker = threading.Thread(target=target, daemon=True)
+        worker.start()
+        worker.join(timeout)
+        if worker.is_alive() or not box:
+            return _timeout_tool_result(name, timeout)
+        return box[0]
+
+    def _invoke_sync_tool(self, name: str, args: dict[str, Any]) -> ToolResult:
+        """Execute a sync tool without touching the agent event loop."""
+        try:
+            tool = self.tools.get(name)
+        except ToolNotFoundError:
+            raise
+        try:
+            result = tool.func(**(args or {}))
+        except ToolError as exc:
+            return ToolResult(
+                content=f"Error: {exc}", summary="Tool error", ok=False, error=str(exc)
+            )
+        except Exception as exc:
+            return ToolResult(
+                content=f"Error: {exc}",
+                summary="Execution failed",
+                ok=False,
+                error=str(exc),
+            )
+        text = str(result)
+        return ToolResult(content=text, summary=text[:300], ok=True)
 
     # -- budget -----------------------------------------------------------------
     def _check_budget(

@@ -7,6 +7,8 @@ Composable patterns cover most teams:
 * **route**      - a selector picks the single best agent for the task.
 * **debate**     - multi-round discussion where agents respond to each other.
 * **map_reduce** - parallel workers then a reducer synthesises their outputs.
+* **handoff**    - run one agent, then pass its output to another with a prefix.
+* **supervise**  - worker/critic loop; critic replies ``ACCEPT`` or ``REVISE:``.
 
 For free-form delegation, expose an agent with :meth:`Agent.as_tool` and give it
 to a "manager" agent's tool registry.
@@ -18,10 +20,43 @@ import asyncio
 from collections.abc import Callable
 from typing import Any
 
+from pydantic import BaseModel
+
 from .agent import Agent, AgentResult
 from .errors import OrchestrationError
+from .messages import Message
 
 Selector = Callable[[str, dict[str, Agent]], str]
+
+
+class SuperviseResult(BaseModel):
+    """Outcome of :meth:`Orchestrator.supervise`."""
+
+    accepted: bool
+    rounds: int
+    final: AgentResult
+
+    @property
+    def output(self) -> str | None:
+        return self.final.output
+
+
+class HandoffResult(BaseModel):
+    """Outcome of :meth:`Orchestrator.handoff` — both legs of the transfer."""
+
+    from_name: str
+    to_name: str
+    from_result: AgentResult
+    to_result: AgentResult
+
+    @property
+    def output(self) -> str | None:
+        return self.to_result.output
+
+    @property
+    def result(self) -> AgentResult:
+        """The receiving agent's result (the handoff output)."""
+        return self.to_result
 
 
 class Orchestrator:
@@ -213,6 +248,84 @@ class Orchestrator:
             "output": reducer_result.output,
         }
 
+    async def handoff(
+        self,
+        prompt: str,
+        from_name: str,
+        to_name: str,
+    ) -> HandoffResult:
+        """Run ``from_name``, then feed its output to ``to_name``.
+
+        The receiving agent sees a short system/user handoff prefix plus the
+        original ``prompt``. Returns a :class:`HandoffResult` with both legs.
+        """
+        source = self._resolve_one(from_name)
+        dest = self._resolve_one(to_name)
+        from_result = await source.arun(prompt)
+        prior = from_result.output or ""
+        extra = [
+            Message.system(
+                f"Handoff from agent '{from_name}'. "
+                "Continue their work; use the prior output as context."
+            ),
+        ]
+        dest_prompt = (
+            f"[handoff from {from_name}]\n"
+            f"{prior}\n\n"
+            f"{prompt}"
+        )
+        to_result = await dest.arun(dest_prompt, extra_messages=extra)
+        return HandoffResult(
+            from_name=from_name,
+            to_name=to_name,
+            from_result=from_result,
+            to_result=to_result,
+        )
+
+    async def supervise(
+        self,
+        prompt: str,
+        worker: str | Agent,
+        critic: str | Agent,
+        max_rounds: int = 2,
+    ) -> SuperviseResult:
+        """Run a worker, then a critic, revising until ``ACCEPT`` or ``max_rounds``.
+
+        The worker answers ``prompt``. The critic is asked to reply with a first
+        line of ``ACCEPT`` or ``REVISE: <notes>``. On ``REVISE``, the worker is
+        re-run with the original task, its previous answer, and the notes.
+
+        ``worker`` / ``critic`` may be registered agent names or :class:`Agent`
+        instances. Returns a :class:`SuperviseResult` with ``accepted``,
+        ``rounds`` and the last worker :class:`AgentResult` as ``final``.
+        """
+        if max_rounds < 1:
+            raise OrchestrationError("supervise max_rounds must be >= 1")
+        worker_agent = self._coerce_agent(worker, "worker")
+        critic_agent = self._coerce_agent(critic, "critic")
+
+        worker_prompt = prompt
+        last_result: AgentResult | None = None
+        accepted = False
+        rounds_used = 0
+
+        for round_num in range(1, max_rounds + 1):
+            rounds_used = round_num
+            last_result = await worker_agent.arun(worker_prompt)
+            critic_prompt = _critic_prompt(prompt, last_result.output or "")
+            critic_result = await critic_agent.arun(critic_prompt)
+            decision, notes = _parse_critic_verdict(critic_result.output)
+            if decision == "accept":
+                accepted = True
+                break
+            if round_num < max_rounds:
+                worker_prompt = _revision_prompt(
+                    prompt, last_result.output or "", notes
+                )
+
+        assert last_result is not None  # max_rounds >= 1 guarantees a worker run
+        return SuperviseResult(accepted=accepted, rounds=rounds_used, final=last_result)
+
     def to_mermaid(self) -> str:
         """Return a Mermaid flowchart diagram of the registered agent team.
 
@@ -240,6 +353,14 @@ class Orchestrator:
         return "\n".join(lines)
 
     # -- helpers ----------------------------------------------------------------
+    def _coerce_agent(self, value: str | Agent, label: str) -> Agent:
+        if isinstance(value, Agent):
+            return value
+        try:
+            return self._resolve_one(value)
+        except OrchestrationError as exc:
+            raise OrchestrationError(f"Unknown {label}: {value!r}") from exc
+
     def _resolve_agents(
         self, agents: list[str] | list[Agent] | None
     ) -> list[Agent]:
@@ -269,6 +390,48 @@ class Orchestrator:
             f"Transcript so far:\n" + "\n".join(history) + "\n\n"
             "Respond to the other agents. Build on strong points, challenge weak ones."
         )
+
+
+def _critic_prompt(original: str, worker_output: str) -> str:
+    return (
+        "You are a critic reviewing another agent's work.\n\n"
+        f"Original task:\n{original}\n\n"
+        f"Worker's answer:\n{worker_output}\n\n"
+        "Reply with a decision on the FIRST line, exactly one of:\n"
+        "ACCEPT\n"
+        "REVISE: <notes>\n"
+        "If you revise, put actionable notes after the colon. "
+        "You may add extra explanation after the first line."
+    )
+
+
+def _revision_prompt(original: str, previous: str, notes: str) -> str:
+    return (
+        f"Original task:\n{original}\n\n"
+        f"Your previous answer:\n{previous}\n\n"
+        f"A critic requested a revision:\n{notes or '(no notes)'}\n\n"
+        "Produce an improved answer that addresses the critic's notes."
+    )
+
+
+def _parse_critic_verdict(text: str | None) -> tuple[str, str]:
+    """Return ``('accept', '')`` or ``('revise', notes)`` from critic output."""
+    raw = (text or "").strip()
+    if not raw:
+        return "revise", ""
+    lines = raw.splitlines()
+    first = lines[0].strip()
+    head = first.split(None, 1)[0].rstrip(":").upper()
+    rest_first = first[len(first.split(None, 1)[0]) :].strip()
+    if rest_first.startswith(":"):
+        rest_first = rest_first[1:].strip()
+    extra = "\n".join(lines[1:]).strip()
+    notes = "\n".join(p for p in (rest_first, extra) if p)
+    if head == "ACCEPT":
+        return "accept", notes
+    if head == "REVISE":
+        return "revise", notes
+    return "revise", raw
 
 
 def _mermaid_id(name: str) -> str:

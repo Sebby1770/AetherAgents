@@ -41,6 +41,25 @@ def test_export_trace_writes_json(tmp_path):
     assert data["agent"] == "a"
 
 
+def test_to_trace_html_contains_steps_and_escapes_script(tmp_path):
+    provider = MockProvider(
+        [[("ping", {"msg": "<script>alert(1)</script>"})], "done <script>xss</script>"]
+    )
+    agent = Agent("tracer", provider, tools=[ping])
+    result = agent.run("ping <script>me</script>")
+    html = result.to_trace_html()
+    assert "<html" in html.lower()
+    assert "cdn" not in html.lower()
+    assert "ping" in html
+    assert "tool_call" in html
+    assert "done" in html
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html
+    written = result.write_trace_html(tmp_path / "traces" / "run.html")
+    assert written.exists()
+    assert "&lt;script&gt;" in written.read_text(encoding="utf-8")
+
+
 def test_to_trace_dict_is_json_serialisable():
     agent = Agent("a", MockProvider(["ok"]))
     result = agent.run("x")

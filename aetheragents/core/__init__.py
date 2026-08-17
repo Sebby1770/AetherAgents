@@ -6,6 +6,7 @@ from .agent import Agent, AgentEvent, AgentResult, Step
 from .errors import (
     AetherError,
     BudgetExceeded,
+    CircuitOpenError,
     ConfigError,
     GuardrailError,
     MaxStepsExceeded,
@@ -18,7 +19,7 @@ from .errors import (
 from .guardrails import Guardrail, apply_guardrails, blocklist, max_length, redact
 from .memory import ChromaVectorStore, InMemoryVectorStore, MemoryManager, VectorStore
 from .messages import Message, Role, ToolCall
-from .orchestrator import Orchestrator, keyword_router
+from .orchestrator import HandoffResult, Orchestrator, SuperviseResult, keyword_router
 from .session import Session
 from .structured import extract_json, parse_structured, schema_instruction
 from .tools import Tool, ToolRegistry, ToolResult, make_tool, tool
@@ -29,6 +30,8 @@ __all__ = [
     "AgentResult",
     "Step",
     "Orchestrator",
+    "HandoffResult",
+    "SuperviseResult",
     "keyword_router",
     "Session",
     "ToolRegistry",
@@ -56,6 +59,7 @@ __all__ = [
     "BudgetExceeded",
     "ConfigError",
     "ProviderError",
+    "CircuitOpenError",
     "StructuredOutputError",
     "ToolError",
     "ToolNotFoundError",
