@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,14 @@ from pydantic import BaseModel, Field
 
 from ..llm.base import LLMProvider, LLMResponse, Usage
 from ..telemetry import span
-from .errors import BudgetExceeded, MaxStepsExceeded, ProviderError, StructuredOutputError
+from .errors import (
+    BudgetExceeded,
+    MaxStepsExceeded,
+    ProviderError,
+    StructuredOutputError,
+    ToolError,
+    ToolNotFoundError,
+)
 from .guardrails import Guardrail, apply_guardrails
 from .messages import Message, Role, ToolCall
 from .session import Session
@@ -123,6 +131,15 @@ def _as_registry(tools: Any) -> ToolRegistry:
     return ToolRegistry(list(tools))
 
 
+def _timeout_tool_result(name: str, timeout: float) -> ToolResult:
+    return ToolResult(
+        content=f"Error: tool '{name}' timed out after {timeout}s",
+        summary="Timeout",
+        ok=False,
+        error="timeout",
+    )
+
+
 def _estimate_spent(model: str | None, usage: Usage) -> float:
     """Return estimated spend, treating unknown/None cost as 0.0 for budgets."""
     from ..costs import estimate_cost
@@ -153,6 +170,7 @@ class Agent:
         max_cost_usd: float | None = None,
         tool_approval: ToolApproval | None = None,
         parallel_tools: bool = False,
+        tool_timeout_s: float | None = None,
     ) -> None:
         self.name = name
         self.provider = provider
@@ -170,6 +188,7 @@ class Agent:
         self.max_cost_usd = max_cost_usd
         self.tool_approval = tool_approval
         self.parallel_tools = parallel_tools
+        self.tool_timeout_s = tool_timeout_s
 
     # -- execution --------------------------------------------------------------
     async def astream(
@@ -316,6 +335,28 @@ class Agent:
             "Agent.run() cannot be called from a running event loop; use 'await agent.arun(...)'."
         )
 
+    async def areplay(
+        self,
+        session: Session,
+        prompt: str | None = None,
+        **kwargs: Any,
+    ) -> AgentResult:
+        """Re-run the last user turn (or ``prompt``) against current tools."""
+        text = prompt if prompt is not None else session.replay_prompt()
+        kwargs.setdefault("session", session)
+        return await self.arun(text, **kwargs)
+
+    def replay(
+        self,
+        session: Session,
+        prompt: str | None = None,
+        **kwargs: Any,
+    ) -> AgentResult:
+        """Synchronous wrapper around :meth:`areplay`."""
+        text = prompt if prompt is not None else session.replay_prompt()
+        kwargs.setdefault("session", session)
+        return self.run(text, **kwargs)
+
     # -- tools ------------------------------------------------------------------
     async def _handle_tool_calls(
         self,
@@ -368,7 +409,71 @@ class Agent:
                     ok=False,
                     error="denied",
                 )
-        return await self.tools.execute(name, args)
+        timeout = self.tool_timeout_s
+        if timeout is None:
+            return await self.tools.execute(name, args)
+        return await self._execute_tool_timed(name, args, timeout)
+
+    async def _execute_tool_timed(
+        self, name: str, args: dict[str, Any], timeout: float
+    ) -> ToolResult:
+        """Run a tool with a timeout. Timed-out calls return an error result."""
+        timed_out = _timeout_tool_result(name, timeout)
+        try:
+            tool = self.tools.get(name)
+        except Exception:
+            return await self.tools.execute(name, args)
+
+        if tool.is_async:
+            try:
+                return await asyncio.wait_for(
+                    self.tools.execute(name, args), timeout=timeout
+                )
+            except TimeoutError:
+                return timed_out
+
+        # Sync tools can block the loop; run them off-thread and time the wait.
+        # The worker is not killed on timeout — we just return an error result.
+        return await asyncio.to_thread(
+            self._invoke_sync_tool_timed, name, args, timeout
+        )
+
+    def _invoke_sync_tool_timed(
+        self, name: str, args: dict[str, Any], timeout: float
+    ) -> ToolResult:
+        box: list[ToolResult] = []
+
+        def target() -> None:
+            box.append(self._invoke_sync_tool(name, args))
+
+        worker = threading.Thread(target=target, daemon=True)
+        worker.start()
+        worker.join(timeout)
+        if worker.is_alive() or not box:
+            return _timeout_tool_result(name, timeout)
+        return box[0]
+
+    def _invoke_sync_tool(self, name: str, args: dict[str, Any]) -> ToolResult:
+        """Execute a sync tool without touching the agent event loop."""
+        try:
+            tool = self.tools.get(name)
+        except ToolNotFoundError:
+            raise
+        try:
+            result = tool.func(**(args or {}))
+        except ToolError as exc:
+            return ToolResult(
+                content=f"Error: {exc}", summary="Tool error", ok=False, error=str(exc)
+            )
+        except Exception as exc:
+            return ToolResult(
+                content=f"Error: {exc}",
+                summary="Execution failed",
+                ok=False,
+                error=str(exc),
+            )
+        text = str(result)
+        return ToolResult(content=text, summary=text[:300], ok=True)
 
     # -- budget -----------------------------------------------------------------
     def _check_budget(

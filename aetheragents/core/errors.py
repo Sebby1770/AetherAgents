@@ -18,6 +18,26 @@ class ProviderError(AetherError):
     """Raised when an LLM provider fails or is unavailable."""
 
 
+class CircuitOpenError(ProviderError):
+    """Raised when a :class:`~aetheragents.llm.CircuitBreakerProvider` is open.
+
+    Attributes:
+        provider: Name of the wrapped inner provider, if known.
+        reset_after: Configured cooldown in seconds, if known.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str | None = None,
+        reset_after: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.provider = provider
+        self.reset_after = reset_after
+
+
 class ToolError(AetherError):
     """Raised when a tool fails to execute."""
 

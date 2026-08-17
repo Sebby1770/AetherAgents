@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .messages import Message
+from .messages import Message, Role
 
 
 class Session:
@@ -45,6 +45,13 @@ class Session:
 
     def clear(self) -> None:
         self.messages.clear()
+
+    def replay_prompt(self) -> str:
+        """Return the last user message so an agent can re-run that turn."""
+        for msg in reversed(self.messages):
+            if msg.role is Role.USER and msg.content:
+                return msg.content
+        raise ValueError(f"Session {self.id!r} has no user message to replay")
 
     def fork(
         self,

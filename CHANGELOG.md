@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-18
+
+Richer offline eval, agent handoff, circuit breakers, and tool timeouts.
+
+### Added
+- **Richer eval**: `EvalCase` now supports `expect_not_contains`, `expect_tool`
+  (tool name must appear in the result trace) and optional `expect_regex`.
+  `load_cases(path)` reads JSONL. `EvalReport.to_html()` / `write_html(path)`
+  emit a self-contained HTML report (no CDN). CLI:
+  `aetheragents eval cases.jsonl` (MockProvider demo agent; exit 1 if any fail).
+- **Handoff**: `Orchestrator.handoff(prompt, from_name, to_name)` runs the
+  source agent, then feeds its output to the destination with a short
+  system/user handoff prefix. Returns a `HandoffResult` with both legs.
+- **Circuit breaker**: `CircuitBreakerProvider(inner, failure_threshold=3,
+  reset_after=30.0)` wraps any `LLMProvider`. After N consecutive failures
+  further calls raise `CircuitOpenError` until the cooldown elapses. Inject
+  `clock=` for tests. No new dependencies.
+- **Tool timeouts**: `Agent(..., tool_timeout_s=...)` times out individual
+  tool calls (thread + join for sync, `asyncio.wait_for` for async) and
+  returns a `ToolResult` error string instead of killing the process.
+- **Replay**: `Session.replay_prompt()` returns the last user message;
+  `agent.replay(session)` (or an explicit `prompt=`) re-runs it against the
+  current tools.
+- Example cases: `examples/eval_cases.jsonl`.
+
+### Changed
+- Package version bumped to **0.6.0**.
+- Core dependency remains **pydantic only**.
+
 ## [0.5.0] - 2026-07-19
 
 Orchestration power, safety rails, offline eval, and a first-class CLI.
@@ -190,7 +219,9 @@ testable multi-agent framework.
 - The package is now importable without `litellm`, `chromadb` or
   `pydantic-settings` installed (previously `import aetheragents` could fail).
 
-[Unreleased]: https://github.com/Sebby1770/AetherAgents/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Sebby1770/AetherAgents/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/Sebby1770/AetherAgents/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/Sebby1770/AetherAgents/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Sebby1770/AetherAgents/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Sebby1770/AetherAgents/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Sebby1770/AetherAgents/releases/tag/v0.2.0

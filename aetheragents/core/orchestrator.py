@@ -7,6 +7,7 @@ Composable patterns cover most teams:
 * **route**      - a selector picks the single best agent for the task.
 * **debate**     - multi-round discussion where agents respond to each other.
 * **map_reduce** - parallel workers then a reducer synthesises their outputs.
+* **handoff**    - run one agent, then pass its output to another with a prefix.
 
 For free-form delegation, expose an agent with :meth:`Agent.as_tool` and give it
 to a "manager" agent's tool registry.
@@ -18,10 +19,31 @@ import asyncio
 from collections.abc import Callable
 from typing import Any
 
+from pydantic import BaseModel
+
 from .agent import Agent, AgentResult
 from .errors import OrchestrationError
+from .messages import Message
 
 Selector = Callable[[str, dict[str, Agent]], str]
+
+
+class HandoffResult(BaseModel):
+    """Outcome of :meth:`Orchestrator.handoff` — both legs of the transfer."""
+
+    from_name: str
+    to_name: str
+    from_result: AgentResult
+    to_result: AgentResult
+
+    @property
+    def output(self) -> str | None:
+        return self.to_result.output
+
+    @property
+    def result(self) -> AgentResult:
+        """The receiving agent's result (the handoff output)."""
+        return self.to_result
 
 
 class Orchestrator:
@@ -212,6 +234,40 @@ class Orchestrator:
             "reducer": reducer_result,
             "output": reducer_result.output,
         }
+
+    async def handoff(
+        self,
+        prompt: str,
+        from_name: str,
+        to_name: str,
+    ) -> HandoffResult:
+        """Run ``from_name``, then feed its output to ``to_name``.
+
+        The receiving agent sees a short system/user handoff prefix plus the
+        original ``prompt``. Returns a :class:`HandoffResult` with both legs.
+        """
+        source = self._resolve_one(from_name)
+        dest = self._resolve_one(to_name)
+        from_result = await source.arun(prompt)
+        prior = from_result.output or ""
+        extra = [
+            Message.system(
+                f"Handoff from agent '{from_name}'. "
+                "Continue their work; use the prior output as context."
+            ),
+        ]
+        dest_prompt = (
+            f"[handoff from {from_name}]\n"
+            f"{prior}\n\n"
+            f"{prompt}"
+        )
+        to_result = await dest.arun(dest_prompt, extra_messages=extra)
+        return HandoffResult(
+            from_name=from_name,
+            to_name=to_name,
+            from_result=from_result,
+            to_result=to_result,
+        )
 
     def to_mermaid(self) -> str:
         """Return a Mermaid flowchart diagram of the registered agent team.

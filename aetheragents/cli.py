@@ -4,6 +4,7 @@ Commands::
 
     aetheragents version
     aetheragents run --agent demo "hello"
+    aetheragents eval cases.jsonl
     aetheragents doctor
 """
 
@@ -12,7 +13,8 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import sys
-from typing import Sequence
+from collections.abc import Sequence
+from typing import Any
 
 
 def _cmd_version(_: argparse.Namespace) -> int:
@@ -95,6 +97,56 @@ def _cmd_doctor(_: argparse.Namespace) -> int:
     return 0  # doctor is informational; never fail the shell hard
 
 
+def _last_user_text(messages: Sequence[Any]) -> str:
+    for msg in reversed(messages):
+        role = getattr(getattr(msg, "role", None), "value", getattr(msg, "role", None))
+        content = getattr(msg, "content", None)
+        if role == "user" and content:
+            return str(content)
+    return ""
+
+
+def _cmd_eval(args: argparse.Namespace) -> int:
+    """Run JSONL eval cases against a MockProvider demo agent."""
+    from aetheragents import Agent, MockProvider
+    from aetheragents.eval import load_cases, run_cases
+
+    try:
+        cases = load_cases(args.cases)
+    except FileNotFoundError:
+        print(f"error: cases file not found: {args.cases}", file=sys.stderr)
+        return 2
+    except (OSError, ValueError) as exc:
+        print(f"error: failed to load cases: {exc}", file=sys.stderr)
+        return 2
+
+    name = args.agent or "demo"
+
+    def _reply(messages: object) -> str:
+        return f"[{name}] You said: {_last_user_text(messages)}"
+
+    provider = MockProvider(handler=_reply, model="mock-1")
+    agent = Agent(
+        name,
+        provider,
+        instructions=f"You are the '{name}' demo agent (offline MockProvider).",
+    )
+    report = run_cases(agent, cases)
+    print(report)
+    for case in report.cases:
+        status = "PASS" if case.passed else "FAIL"
+        print(f"  {status}  {case.name}")
+        if not case.passed:
+            if case.error:
+                print(f"        error: {case.error}")
+            for reason in case.reasons:
+                print(f"        {reason}")
+    if args.html:
+        written = report.write_html(args.html)
+        print(f"wrote HTML report: {written}")
+    return 0 if report.ok else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="aetheragents",
@@ -117,6 +169,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_doctor = sub.add_parser("doctor", help="Check which optional extras are installed")
     p_doctor.set_defaults(func=_cmd_doctor)
+
+    p_eval = sub.add_parser("eval", help="Run JSONL eval cases (offline MockProvider)")
+    p_eval.add_argument("cases", help="Path to a JSONL file of eval cases")
+    p_eval.add_argument(
+        "--agent", "-a", default="demo", help="Demo agent name (default: demo)"
+    )
+    p_eval.add_argument(
+        "--html", default=None, help="Write a self-contained HTML report to this path"
+    )
+    p_eval.set_defaults(func=_cmd_eval)
 
     return parser
 

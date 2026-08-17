@@ -34,13 +34,14 @@ print(agent.run("What is 2 + 2?").output)   # -> It's 4.
 | 🌊 **Streaming** | `agent.astream()` yields live text deltas and tool events; every provider streams (native or fallback). |
 | 📦 **Structured output** | `run(prompt, response_model=MyModel)` returns a validated Pydantic instance, with automatic schema-violation retries. |
 | 🛠️ **Real tool schemas** | The `@tool` decorator generates JSON-Schema from your function signature and type hints — no hand-written specs. Built-in calculator / clock / HTTP tools included. |
-| 🤝 **Multi-agent** | Sequential, parallel, route, **debate**, **map-reduce**, and agent-as-tool delegation. |
+| 🤝 **Multi-agent** | Sequential, parallel, route, **debate**, **map-reduce**, **handoff**, and agent-as-tool delegation. |
 | 🧠 **Memory & sessions** | Rolling window + long-term vector recall, JSON-persisted `Session`s, and **session forks** for branching. |
 | 🛡️ **Guardrails & budgets** | Input/output hooks plus hard **cost budgets** (`max_cost_usd`) and human **tool approval**. |
 | 💰 **Cost tracking** | `result.cost_usd` estimates spend per run; export full traces as JSON. |
 | ✅ **Testable** | Deterministic mock provider, offline **eval harness**, and a full unit suite — no API keys. |
-| 🔭 **Observable & resilient** | Optional OpenTelemetry, step traces, `RetryingProvider` backoff, Mermaid team diagrams. |
-| ⌨️ **CLI** | `aetheragents run`, `version`, and `doctor` for offline demos and install checks. |
+| 🔭 **Observable & resilient** | Optional OpenTelemetry, step traces, `RetryingProvider` backoff, `CircuitBreakerProvider`, Mermaid team diagrams. |
+| ⌨️ **CLI** | `aetheragents run`, `eval`, `version`, and `doctor` for offline demos and install checks. |
+| 🔁 **Eval, handoff, breaker** | Richer eval (`expect_tool`, `expect_regex`, HTML reports), `Orchestrator.handoff`, and `CircuitBreakerProvider`. |
 
 ## Install
 
@@ -96,8 +97,9 @@ agent = Agent("assistant", AnthropicProvider("claude-sonnet-5"), tools=[get_weat
 Wrap any provider for resilience:
 
 ```python
-from aetheragents import RetryingProvider
+from aetheragents import CircuitBreakerProvider, RetryingProvider
 provider = RetryingProvider(AnthropicProvider(), max_retries=3)   # exponential backoff
+provider = CircuitBreakerProvider(provider, failure_threshold=3, reset_after=30)
 ```
 
 ### Streaming
@@ -213,6 +215,7 @@ agent = Agent(
     tools=[...],
     tool_approval=approve,     # False -> "User denied tool execution"
     parallel_tools=True,       # asyncio.gather independent tool calls
+    tool_timeout_s=5.0,        # timed-out tools return an error ToolResult
 )
 ```
 
@@ -256,6 +259,10 @@ mr = asyncio.run(team.map_reduce(
 ))
 print(mr["output"])
 
+# Handoff: researcher output feeds the writer with a handoff prefix
+handed = asyncio.run(team.handoff("Write about X", from_name="researcher", to_name="writer"))
+print(handed.output)
+
 # Docs: Mermaid diagram of the team
 print(team.to_mermaid())
 ```
@@ -277,6 +284,9 @@ agent.run("My printer is on fire", session=session)
 # Branch the conversation without mutating the parent history
 branch = session.fork(name="try-reset")
 agent.run("Have you tried turning it off and on?", session=branch)
+
+# Re-run the last user turn against the current tools
+agent.replay(session)                 # or session.replay_prompt()
 ```
 
 ### Offline eval
@@ -288,10 +298,14 @@ from aetheragents.eval import run_cases
 agent = Agent("demo", MockProvider(["hello world", "42"]))
 report = run_cases(agent, [
     {"prompt": "greet", "expect_contains": "hello"},
-    {"prompt": "answer", "expect_contains": "42"},
+    {"prompt": "answer", "expect_contains": "42", "expect_not_contains": "error"},
 ])
 assert report.ok
+report.write_html("eval-report.html")
 ```
+
+JSONL cases (`expect_contains`, `expect_not_contains`, `expect_tool`, `expect_regex`)
+load with `load_cases("examples/eval_cases.jsonl")`.
 
 ### CLI
 
@@ -299,6 +313,7 @@ assert report.ok
 aetheragents version
 aetheragents doctor                          # which extras are installed?
 aetheragents run --agent demo "hello"        # offline MockProvider demo
+aetheragents eval examples/eval_cases.jsonl  # offline eval (exit 1 on fail)
 ```
 
 ### Memory
@@ -338,7 +353,7 @@ app = create_app({"echo": Agent("echo", MockProvider(default="hi"))})
 ```
                 ┌─────────────────────────────────────────────┐
                 │                Orchestrator                  │
-                │ sequential · parallel · route · debate · map-reduce │
+                │ sequential · parallel · route · debate · map-reduce · handoff │
                 └───────────────┬──────────────┬──────────────┘
                                 │              │
                         ┌───────▼──────┐ ┌─────▼────────┐
@@ -348,7 +363,7 @@ app = create_app({"echo": Agent("echo", MockProvider(default="hi"))})
               ┌─────────────▼─┐  ┌─▼──────────────┐  ┌───────────────────────────┐
               │ ToolRegistry  │  │ MemoryManager  │  │        LLMProvider        │
               │ (auto schema) │  │ short + vector │  │ Mock | LiteLLM | Anthropic│
-              │ + built-ins   │  │ + Session      │  │ (+ RetryingProvider wrap) │
+              │ + built-ins   │  │ + Session      │  │ (+ Retrying/breaker wrap) │
               └───────────────┘  └────────────────┘  └───────────────────────────┘
 ```
 
