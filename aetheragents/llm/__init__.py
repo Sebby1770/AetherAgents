@@ -5,6 +5,7 @@ from __future__ import annotations
 from .anthropic_provider import AnthropicProvider
 from .base import LLMProvider, LLMResponse, StreamEvent, Usage
 from .circuit import CircuitBreakerProvider
+from .fallback import FallbackProvider
 from .litellm_provider import LiteLLMProvider
 from .mock import MockProvider
 from .rate_limit import RateLimitedProvider
@@ -21,4 +22,5 @@ __all__ = [
     "RetryingProvider",
     "CircuitBreakerProvider",
     "RateLimitedProvider",
+    "FallbackProvider",
 ]

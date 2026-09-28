@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-28
+
+Conditional workflows, a team cost cap, consensus quorum, and result diffs.
+
+### Added
+- **Workflow conditions**: a step may set `when` and optional `equals`. The
+  step runs only when that blackboard key is present and, if `equals` is set,
+  its rendered value matches. Skipped agent names are returned on
+  `WorkflowResult.skipped`.
+- **Prompt fill**: `{key}` in a workflow prompt is replaced from the blackboard
+  before the agent runs.
+- **Team budget**: `workflow(..., max_cost_usd=)` stops before the next step
+  once estimated spend reaches the cap. Completed steps are kept.
+  `stopped` is `"budget"` and `spent_usd` is the total. Unknown models count
+  as zero.
+- **Consensus quorum**: `consensus(..., min_agreement=0.5)` still returns the
+  winning answer. `quorum` is true only when the share of matching answers
+  meets the threshold.
+- **Result diff**: `diff_results(left, right)` reports whether the output
+  changed, which tool names were added or removed, and the estimated cost
+  delta.
+
+### Changed
+- Package version bumped to **0.9.0**.
+- Core dependency remains **pydantic only**.
+
+## [0.8.0] - 2026-09-28
+
+Team coordination: provider fallback, a shared blackboard, cached tools,
+majority consensus, and saved workflows.
+
+### Added
+- **Fallback provider**: `FallbackProvider([primary, secondary])` tries each
+  provider in order. Only `ProviderError` (or a custom `retry_on` tuple)
+  advances to the next provider. `attempts` and `last_provider` record the
+  last call.
+- **Blackboard**: `Blackboard` is a thread-safe JSON-safe key/value store.
+  `board.bind(agent)` adds `blackboard_read` and `blackboard_write` tools.
+  Keys are short identifiers; values are copied on read and write.
+- **Tool cache**: `ToolCache.wrap(tool)` / `wrap_all(tools)` memoises a tool
+  by name and canonical arguments. `hits` and `misses` count lookups.
+- **Consensus**: `Orchestrator.consensus(prompt, names=..., judge=...)` runs
+  agents in parallel. The most common stripped answer wins; ties follow
+  agent order. A judge that replies `PICK: <agent>` on the first line can
+  override the vote. A bad verdict falls back to the majority.
+- **Workflow**: `Orchestrator.workflow(prompt, steps, blackboard=...)` runs
+  agents in order, feeding each output to the next. A step may set `prompt`
+  and `save_as`. Saved text is returned on the result and stored on the
+  blackboard when one is passed.
+- Example: `examples/consensus_team.py`.
+
+### Changed
+- Package version bumped to **0.8.0**.
+- Core dependency remains **pydantic only**.
+
 ## [0.7.0] - 2026-08-18
 
 Supervisor loop, session compact, HTML traces, safer breaker, and JSON eval.
@@ -252,7 +307,9 @@ testable multi-agent framework.
 - The package is now importable without `litellm`, `chromadb` or
   `pydantic-settings` installed (previously `import aetheragents` could fail).
 
-[Unreleased]: https://github.com/Sebby1770/AetherAgents/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/Sebby1770/AetherAgents/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/Sebby1770/AetherAgents/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/Sebby1770/AetherAgents/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/Sebby1770/AetherAgents/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/Sebby1770/AetherAgents/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Sebby1770/AetherAgents/compare/v0.4.0...v0.5.0

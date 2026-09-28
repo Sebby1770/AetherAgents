@@ -34,12 +34,12 @@ print(agent.run("What is 2 + 2?").output)   # -> It's 4.
 | 🌊 **Streaming** | `agent.astream()` yields live text deltas and tool events; every provider streams (native or fallback). |
 | 📦 **Structured output** | `run(prompt, response_model=MyModel)` returns a validated Pydantic instance, with automatic schema-violation retries. |
 | 🛠️ **Real tool schemas** | The `@tool` decorator generates JSON-Schema from your function signature and type hints — no hand-written specs. Built-in calculator / clock / HTTP tools included. |
-| 🤝 **Multi-agent** | Sequential, parallel, route, **debate**, **map-reduce**, **handoff**, **supervise** (worker/critic), and agent-as-tool delegation. |
+| 🤝 **Multi-agent** | Sequential, parallel, route, **debate**, **map-reduce**, **handoff**, **supervise**, **consensus**, **workflow**, and agent-as-tool delegation. |
 | 🧠 **Memory & sessions** | Rolling window + long-term vector recall, JSON-persisted `Session`s, **session forks**, and **compact** to drop old turns. |
 | 🛡️ **Guardrails & budgets** | Input/output hooks plus hard **cost budgets** (`max_cost_usd`) and human **tool approval**. |
 | 💰 **Cost tracking** | `result.cost_usd` estimates spend per run; export full traces as JSON or **self-contained HTML**. |
 | ✅ **Testable** | Deterministic mock provider, offline **eval harness**, and a full unit suite — no API keys. |
-| 🔭 **Observable & resilient** | Optional OpenTelemetry, step traces, `RetryingProvider` backoff, `CircuitBreakerProvider`, Mermaid team diagrams. |
+| 🔭 **Observable & resilient** | Optional OpenTelemetry, step traces, `RetryingProvider`, `CircuitBreakerProvider`, `FallbackProvider`, `RateLimitedProvider`, Mermaid team diagrams. |
 | ⌨️ **CLI** | `aetheragents run` (including `--agent-file`), `eval --html`, `trace`, `version`, and `doctor`. |
 | 🔁 **Eval, supervise, breaker** | JSON-shape eval (`expect_json` / `expect_json_keys`), `Orchestrator.supervise`, thread-safe `CircuitBreakerProvider`, `RateLimitedProvider`. |
 
@@ -97,10 +97,16 @@ agent = Agent("assistant", AnthropicProvider("claude-sonnet-5"), tools=[get_weat
 Wrap any provider for resilience:
 
 ```python
-from aetheragents import CircuitBreakerProvider, RateLimitedProvider, RetryingProvider
+from aetheragents import (
+    CircuitBreakerProvider,
+    FallbackProvider,
+    RateLimitedProvider,
+    RetryingProvider,
+)
 provider = RetryingProvider(AnthropicProvider(), max_retries=3)   # exponential backoff
 provider = CircuitBreakerProvider(provider, failure_threshold=3, reset_after=30)
 provider = RateLimitedProvider(provider, min_interval_s=0.2)      # space out calls
+provider = FallbackProvider([provider, LiteLLMProvider("gpt-4o-mini")])  # next on ProviderError
 ```
 
 ### Streaming
@@ -389,6 +395,49 @@ app = create_app({"echo": Agent("echo", MockProvider(default="hi"))})
               │ + built-ins   │  │ + Session      │  │ (+ Retrying/breaker/rate) │
               └───────────────┘  └────────────────┘  └───────────────────────────┘
 ```
+
+### Consensus, workflows, and a shared blackboard
+
+`consensus` runs the same prompt across agents and keeps the majority answer.
+A judge can override with a first line of `PICK: <agent name>`:
+
+```python
+from aetheragents import Agent, Blackboard, FallbackProvider, Orchestrator, ToolCache
+
+vote = await orch.consensus("Should we ship?", names=["alpha", "beta", "gamma"], judge="judge")
+vote.winner          # agent name
+vote.agreement       # share of agents whose answer matches the winner
+
+board = Blackboard()
+await orch.workflow(
+    "Write a note",
+    [{"agent": "draft", "save_as": "draft"}, {"agent": "edit"}],
+    blackboard=board,
+)
+board.get("draft")
+board.bind(agent)    # adds blackboard_read / blackboard_write tools
+
+held = await orch.workflow(
+    "go",
+    [{"agent": "ship", "when": "status", "equals": "go", "prompt": "Ship {draft}"}],
+    blackboard=board,
+    max_cost_usd=0.25,
+)
+held.skipped         # agents whose blackboard condition was not met
+held.stopped         # "budget" when the cap halted later steps
+
+vote = await orch.consensus("Ship?", min_agreement=0.6)
+vote.quorum          # True when the winner's share is at least 0.6
+
+from aetheragents import diff_results
+diff_results(left_result, right_result)["tools_added"]
+
+cache = ToolCache()
+agent = Agent("scribe", provider, tools=cache.wrap_all([word_count]))
+```
+
+`FallbackProvider` tries the next provider only after `ProviderError`.
+`ToolCache` returns the first result for identical tool arguments.
 
 ## Development
 

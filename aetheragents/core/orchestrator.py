@@ -9,6 +9,8 @@ Composable patterns cover most teams:
 * **map_reduce** - parallel workers then a reducer synthesises their outputs.
 * **handoff**    - run one agent, then pass its output to another with a prefix.
 * **supervise**  - worker/critic loop; critic replies ``ACCEPT`` or ``REVISE:``.
+* **consensus**  - parallel answers, majority vote, optional ``PICK:`` judge.
+* **workflow**   - ordered steps; each output feeds the next and can be saved.
 
 For free-form delegation, expose an agent with :meth:`Agent.as_tool` and give it
 to a "manager" agent's tool registry.
@@ -17,12 +19,14 @@ to a "manager" agent's tool registry.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ValidationError
 
 from .agent import Agent, AgentResult
+from .blackboard import Blackboard, BlackboardError
 from .errors import OrchestrationError
 from .messages import Message
 
@@ -57,6 +61,51 @@ class HandoffResult(BaseModel):
     def result(self) -> AgentResult:
         """The receiving agent's result (the handoff output)."""
         return self.to_result
+
+
+class ConsensusResult(BaseModel):
+    """Outcome of :meth:`Orchestrator.consensus`."""
+
+    winner: str
+    output: str | None
+    agreement: float
+    judged: bool
+    quorum: bool = True
+    results: dict[str, AgentResult]
+
+    @property
+    def votes(self) -> dict[str, str]:
+        """Agent name to stripped output."""
+        return {name: (result.output or "").strip() for name, result in self.results.items()}
+
+
+class WorkflowStep(BaseModel):
+    """One step in :meth:`Orchestrator.workflow`."""
+
+    agent: str
+    prompt: str | None = None
+    save_as: str | None = None
+    #: Run this step only when the blackboard contains ``when``.
+    when: str | None = None
+    #: If set, the blackboard value at ``when`` must render as this text.
+    equals: str | None = None
+
+
+class WorkflowResult(BaseModel):
+    """Outcome of :meth:`Orchestrator.workflow`."""
+
+    steps: list[AgentResult]
+    saved: dict[str, str]
+    skipped: list[str] = Field(default_factory=list)
+    #: ``"budget"`` when a team cost cap stopped the remaining steps.
+    stopped: str | None = None
+    spent_usd: float = 0.0
+
+    @property
+    def output(self) -> str | None:
+        if not self.steps:
+            return None
+        return self.steps[-1].output
 
 
 class Orchestrator:
@@ -326,6 +375,117 @@ class Orchestrator:
         assert last_result is not None  # max_rounds >= 1 guarantees a worker run
         return SuperviseResult(accepted=accepted, rounds=rounds_used, final=last_result)
 
+    async def consensus(
+        self,
+        prompt: str,
+        names: list[str] | None = None,
+        *,
+        judge: str | Agent | None = None,
+        min_agreement: float = 0.0,
+    ) -> ConsensusResult:
+        """Run agents on the same prompt and pick a winning answer.
+
+        Without ``judge``, the most common stripped output wins. Ties keep the
+        answer of the earliest agent in ``names`` (or registration order).
+        With ``judge``, that agent must reply with a first line of
+        ``PICK: <agent name>``. An unusable verdict falls back to the vote.
+
+        ``min_agreement`` does not change the winner. ``quorum`` is true when
+        the share of agents matching that winner is at least the threshold.
+        """
+        if not 0.0 <= min_agreement <= 1.0:
+            raise OrchestrationError("min_agreement must be between 0 and 1")
+        agents = self._resolve(names)
+        if not agents:
+            raise OrchestrationError("No agents to run.")
+        results = await asyncio.gather(*(agent.arun(prompt) for agent in agents))
+        by_name = {agent.name: result for agent, result in zip(agents, results, strict=False)}
+        winner = _majority_winner(agents, by_name)
+        judged = False
+        if judge is not None:
+            judge_agent = self._coerce_agent(judge, "judge")
+            verdict = await judge_agent.arun(_judge_prompt(prompt, agents, by_name))
+            picked = _parse_pick(verdict.output, [agent.name for agent in agents])
+            if picked is not None:
+                winner = picked
+                judged = True
+        output = by_name[winner].output
+        matching = sum(
+            1
+            for result in by_name.values()
+            if (result.output or "").strip() == (output or "").strip()
+        )
+        agreement = matching / len(agents)
+        return ConsensusResult(
+            winner=winner,
+            output=output,
+            agreement=agreement,
+            judged=judged,
+            quorum=agreement + 1e-12 >= min_agreement,
+            results=by_name,
+        )
+
+    async def workflow(
+        self,
+        prompt: str,
+        steps: list[WorkflowStep | dict[str, Any]],
+        *,
+        blackboard: Blackboard | None = None,
+        max_cost_usd: float | None = None,
+    ) -> WorkflowResult:
+        """Run agents in order. Each step sees the previous output.
+
+        A step ``prompt`` replaces that hand-off text. ``{key}`` placeholders
+        in that text are filled from the blackboard. ``when`` / ``equals``
+        skip a step unless the blackboard matches. ``save_as`` records the
+        step output and, when ``blackboard`` is set, stores it there.
+
+        ``max_cost_usd`` stops before the next step once estimated spend
+        reaches the cap. Unknown model costs count as zero. Completed steps
+        are kept; ``stopped`` is ``"budget"``.
+        """
+        if not steps:
+            raise OrchestrationError("workflow requires at least one step")
+        if max_cost_usd is not None and max_cost_usd < 0:
+            raise OrchestrationError("max_cost_usd must be >= 0")
+        parsed = [_as_step(step) for step in steps]
+        current = prompt
+        results: list[AgentResult] = []
+        saved: dict[str, str] = {}
+        skipped: list[str] = []
+        stopped: str | None = None
+        spent = 0.0
+        for step in parsed:
+            if step.when and not _when_matches(blackboard, step):
+                skipped.append(step.agent)
+                continue
+            if max_cost_usd is not None and spent >= max_cost_usd:
+                stopped = "budget"
+                break
+            agent = self._resolve_one(step.agent)
+            text = current if step.prompt is None else step.prompt
+            text = _fill_prompt(text, blackboard)
+            result = await agent.arun(text)
+            results.append(result)
+            current = result.output or ""
+            spent += result.cost_usd or 0.0
+            if step.save_as:
+                saved[step.save_as] = current
+                if blackboard is not None:
+                    try:
+                        blackboard.put(step.save_as, current)
+                    except BlackboardError as exc:
+                        raise OrchestrationError(
+                            f"cannot save workflow key {step.save_as!r}: {exc}"
+                        ) from exc
+        return WorkflowResult(
+            steps=results,
+            saved=saved,
+            skipped=skipped,
+            stopped=stopped,
+            spent_usd=spent,
+        )
+
     def to_mermaid(self) -> str:
         """Return a Mermaid flowchart diagram of the registered agent team.
 
@@ -440,6 +600,87 @@ def _mermaid_id(name: str) -> str:
     if not cleaned or cleaned[0].isdigit():
         cleaned = f"a_{cleaned}"
     return cleaned
+
+
+def _render_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, sort_keys=True)
+
+
+def _when_matches(blackboard: Blackboard | None, step: WorkflowStep) -> bool:
+    if blackboard is None or not step.when or step.when not in blackboard.keys():
+        return False
+    if step.equals is None:
+        return True
+    return _render_value(blackboard.get(step.when)) == step.equals
+
+
+def _fill_prompt(text: str, blackboard: Blackboard | None) -> str:
+    if blackboard is None:
+        return text
+    for key, value in blackboard.snapshot().items():
+        text = text.replace("{" + key + "}", _render_value(value))
+    return text
+
+
+def _majority_winner(agents: list[Agent], results: dict[str, AgentResult]) -> str:
+    """Largest identical stripped output. Ties follow ``agents`` order."""
+    counts: dict[str, int] = {}
+    first_agent: dict[str, str] = {}
+    for agent in agents:
+        text = (results[agent.name].output or "").strip()
+        counts[text] = counts.get(text, 0) + 1
+        first_agent.setdefault(text, agent.name)
+    best_count = max(counts.values())
+    for agent in agents:
+        text = (results[agent.name].output or "").strip()
+        if counts[text] == best_count:
+            return first_agent[text]
+    return agents[0].name
+
+
+def _judge_prompt(original: str, agents: list[Agent], results: dict[str, AgentResult]) -> str:
+    lines = [
+        "You are judging parallel answers to the same task.",
+        "Reply with a decision on the FIRST line, exactly:",
+        "PICK: <agent name>",
+        "",
+        f"Task:\n{original}",
+        "",
+        "Answers:",
+    ]
+    for agent in agents:
+        lines.append(f"[{agent.name}]\n{(results[agent.name].output or '').strip()}")
+    return "\n".join(lines)
+
+
+def _parse_pick(text: str | None, valid_names: list[str]) -> str | None:
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    first = raw.splitlines()[0].strip()
+    head = first.split(None, 1)[0].rstrip(":").upper()
+    if head != "PICK":
+        return None
+    rest = first[len(first.split(None, 1)[0]) :].strip()
+    if rest.startswith(":"):
+        rest = rest[1:].strip()
+    for name in valid_names:
+        if name == rest or name.lower() == rest.lower():
+            return name
+    return None
+
+
+def _as_step(step: WorkflowStep | dict[str, Any]) -> WorkflowStep:
+    if isinstance(step, WorkflowStep):
+        return step
+    if isinstance(step, dict):
+        try:
+            return WorkflowStep.model_validate(step)
+        except ValidationError as exc:
+            raise OrchestrationError(f"invalid workflow step: {exc}") from exc
+    raise OrchestrationError(f"invalid workflow step: {step!r}")
 
 
 def keyword_router(mapping: dict[str, str], default: str | None = None) -> Selector:

@@ -24,9 +24,12 @@ from .core import (
     Agent,
     AgentEvent,
     AgentResult,
+    Blackboard,
+    BlackboardError,
     BudgetExceeded,
     CircuitOpenError,
     ConfigError,
+    ConsensusResult,
     Guardrail,
     GuardrailError,
     HandoffResult,
@@ -43,12 +46,16 @@ from .core import (
     StructuredOutputError,
     SuperviseResult,
     Tool,
+    ToolCache,
     ToolCall,
     ToolError,
     ToolNotFoundError,
     ToolRegistry,
     ToolResult,
+    WorkflowResult,
+    WorkflowStep,
     blocklist,
+    diff_results,
     extract_json,
     keyword_router,
     make_tool,
@@ -61,6 +68,7 @@ from .eval import CaseResult, EvalCase, EvalReport, load_cases, run_cases
 from .llm import (
     AnthropicProvider,
     CircuitBreakerProvider,
+    FallbackProvider,
     LiteLLMProvider,
     LLMProvider,
     LLMResponse,
@@ -73,7 +81,7 @@ from .llm import (
 from .telemetry import configure_tracing, span
 from .tools import builtin_tools, file_tools
 
-__version__ = "0.7.0"
+__version__ = "0.9.0"
 
 __all__ = [
     "__version__",
@@ -88,7 +96,14 @@ __all__ = [
     "Orchestrator",
     "HandoffResult",
     "SuperviseResult",
+    "ConsensusResult",
+    "WorkflowResult",
+    "WorkflowStep",
     "keyword_router",
+    "Blackboard",
+    "BlackboardError",
+    "ToolCache",
+    "diff_results",
     "Session",
     # tools
     "ToolRegistry",
@@ -132,6 +147,7 @@ __all__ = [
     "RetryingProvider",
     "CircuitBreakerProvider",
     "RateLimitedProvider",
+    "FallbackProvider",
     # telemetry
     "configure_tracing",
     "span",

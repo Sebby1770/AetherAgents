@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from .agent import Agent, AgentEvent, AgentResult, Step
+from .blackboard import Blackboard, BlackboardError
+from .diff import diff_results
 from .errors import (
     AetherError,
     BudgetExceeded,
@@ -19,9 +21,18 @@ from .errors import (
 from .guardrails import Guardrail, apply_guardrails, blocklist, max_length, redact
 from .memory import ChromaVectorStore, InMemoryVectorStore, MemoryManager, VectorStore
 from .messages import Message, Role, ToolCall
-from .orchestrator import HandoffResult, Orchestrator, SuperviseResult, keyword_router
+from .orchestrator import (
+    ConsensusResult,
+    HandoffResult,
+    Orchestrator,
+    SuperviseResult,
+    WorkflowResult,
+    WorkflowStep,
+    keyword_router,
+)
 from .session import Session
 from .structured import extract_json, parse_structured, schema_instruction
+from .tool_cache import ToolCache
 from .tools import Tool, ToolRegistry, ToolResult, make_tool, tool
 
 __all__ = [
@@ -32,7 +43,14 @@ __all__ = [
     "Orchestrator",
     "HandoffResult",
     "SuperviseResult",
+    "ConsensusResult",
+    "WorkflowResult",
+    "WorkflowStep",
     "keyword_router",
+    "Blackboard",
+    "BlackboardError",
+    "ToolCache",
+    "diff_results",
     "Session",
     "ToolRegistry",
     "Tool",
